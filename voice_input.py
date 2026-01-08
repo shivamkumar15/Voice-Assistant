@@ -1,26 +1,25 @@
-import whisper
 import speech_recognition as sr
-import os
 
-model = whisper.load_model("base")
-
-def record_audio(filename="input.wav"):
+def listen():
     r = sr.Recognizer()
     with sr.Microphone() as source:
         print("🎤 Adjusting for ambient noise...")
-        r.adjust_for_ambient_noise(source)
+        r.adjust_for_ambient_noise(source, duration=1)
         print("🎤 Honey is listening...")
-        audio = r.listen(source)
+        try:
+            audio = r.listen(source, timeout=5, phrase_time_limit=10)
+        except sr.WaitTimeoutError:
+            return ""
         
-    with open(filename, "wb") as f:
-        f.write(audio.get_wav_data())
-    return filename
-
-def listen():
     try:
-        filename = record_audio()
-        result = model.transcribe(filename)
-        return result["text"]
+        print("🎤 Recognizing...")
+        text = r.recognize_google(audio)
+        return text
+    except sr.UnknownValueError:
+        return ""
+    except sr.RequestError as e:
+        print(f"Could not request results; {e}")
+        return ""
     except Exception as e:
         print(f"Error listening: {e}")
         return ""

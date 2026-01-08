@@ -2,4 +2,16 @@ pyttsx3==2.90
 google-generativeai
 SpeechRecognition
 pyaudio
-openai-whisper
+customtkinter
+pillow
+packaging
+
+# Desktop Control & Automation
+pyautogui
+pygetwindow
+psutil
+
+# Future features (optional for now)
+# requests  # For weather API
+# pywhatkit  # For WhatsApp automation
+# schedule  # For task scheduling
