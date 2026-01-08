@@ -9,6 +9,6 @@ print("\n🔍 Checking available models...\n")
 try:
     for m in genai.list_models():
         if 'generateContent' in m.supported_generation_methods:
-            print(f"✅ FOUND: {m.name}")
+            print(f" FOUND: {m.name}")
 except Exception as e:
-    print(f"❌ Error listing models: {e}")
+    print(f" Error listing models: {e}")
