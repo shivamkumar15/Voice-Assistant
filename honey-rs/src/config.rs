@@ -34,6 +34,10 @@ pub fn vad_threshold() -> f32 {
         .unwrap_or(350.0)
 }
 
+pub fn tts_voice() -> String {
+    std::env::var("HONEY_VOICE").unwrap_or_else(|_| "en-us+f4".to_string())
+}
+
 pub fn whisper_model_path() -> Option<std::path::PathBuf> {
     std::env::var("HONEY_WHISPER_MODEL").ok().map(PathBuf::from)
 }
