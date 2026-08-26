@@ -1,17 +1,15 @@
-pyttsx3==2.90
-google-generativeai
-SpeechRecognition
-pyaudio
-customtkinter
-pillow
-packaging
+# Core voice stack
+SpeechRecognition>=3.10
+PyAudio>=0.2.13
+pyttsx3>=2.90
 
-# Desktop Control & Automation
-pyautogui
-pygetwindow
-psutil
+# System control
+psutil>=5.9
+requests>=2.31
+PyAutoGUI>=0.9.54
 
-# Future features (optional for now)
-# requests  # For weather API
-# pywhatkit  # For WhatsApp automation
-# schedule  # For task scheduling
+# Optional: AI chat fallback via OpenRouter (needs OPENROUTER_API_KEY)
+# (uses `requests`, already listed above — no extra package needed)
+
+# Optional: window management fallback where xdotool is missing
+# pygetwindow
