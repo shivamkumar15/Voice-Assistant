@@ -1,77 +1,104 @@
-# Honey 🐝 — Voice Assistant
+# Alexa 🗣️ — Your Personal Desktop Voice Assistant
 
-A Python desktop voice assistant with an emotion-driven personality, natural-language
-desktop control, and speech in/out. Talk (or type) to your computer and Honey listens,
-thinks, and acts.
+An always-listening, Alexa-style assistant that lives on your desktop.
+Say **"Alexa"** followed by a command and it actually does the thing:
 
-> **Rust edition:** a full offline rewrite lives in [`honey-rs/`](honey-rs/README.md).
+> *"Alexa, open YouTube"* → Google Chrome launches straight to youtube.com
+> *"Alexa, play believer"* → YouTube plays it
+> *"Alexa, volume up" · "Alexa, take a screenshot" · "Alexa, what's the weather in Mumbai"*
+
+## How it works
+
+```
+ you speak ──► ear.py (mic + speech recognition)
+                   │ wake word "alexa"
+                   ▼
+               brain.py ── routes the intent ──► skills/
+                                                  ├─ web.py          open sites / search / play songs
+                                                  ├─ apps.py         launch & quit applications
+                                                  ├─ windows.py      minimise / maximise / focus windows
+                                                  ├─ system_ctl.py   volume · screenshots · power · status
+                                                  ├─ input_control.py type · press · click · scroll
+                                                  └─ info.py         time · date · weather · jokes · AI chat
+                   │
+                   ▼
+              mouth.py (text-to-speech reply)  +  overlay GUI status pill
+```
 
 ## Features
 
-- 🧠 **AI brain** — Google Gemini (`google-generativeai`) with chat history
-- 😊 **Emotion engine** — moods (happy, excited, tired, ...), energy level, relationship score; the AI's system prompt changes with Honey's current mood
-- 💬 **Spontaneous thoughts** — Honey occasionally speaks up on its own when idle
-- 🖥️ **Desktop control** — natural language commands via regex parsing
-  - Apps & windows: open/close/launch apps, minimize/maximize/focus/list windows
-  - Files: search, open, create folder
-  - Keyboard/mouse automation: type text, press keys, copy/paste/save/undo, click/scroll
-  - System info: CPU / memory / disk / battery
-- ⏰ **Time service** — time/date queries, greetings by time of day
-- 🌦️ **Weather** — OpenWeatherMap-backed weather queries (optional API key)
-- 🎤 **Voice** — Google Speech Recognition for input, `pyttsx3` for output
-- 🪟 **GUI** — CustomTkinter chat interface with live emotion sidebar and mic toggle
-
-## Project structure
-
-| File | Purpose |
-|---|---|
-| `main.py` | Terminal loop: listen → think → speak |
-| `gui.py` | CustomTkinter GUI app |
-| `brain.py` | Gemini chat + command dispatch + sentiment detection |
-| `command_parser.py` | Natural-language → action mapping |
-| `desktop_controller.py` | App/window/file/system operations |
-| `automation_controller.py` | Keyboard & mouse control |
-| `emotion_engine.py` | Emotions, energy, relationship score |
-| `personality.py` | Prompts, greetings, spontaneous messages |
-| `time_service.py` | Time/date/reminders |
-| `weather_service.py` | OpenWeatherMap integration |
-| `voice_input.py` / `voice_output.py` | Speech recognition / TTS |
+- 🎙️ **Wake-word activation** — stays quiet until it hears "Alexa" (customisable)
+- 🌐 **Websites in Chrome** — "open youtube", "open gmail", "search google for rust tutorials"
+- ▶️ **Play anything** — "play lofi beats" opens YouTube results instantly
+- 🚀 **Apps** — "open chrome / vscode / terminal / calculator", "close firefox"
+- 🪟 **Windows** — minimise, maximise, focus, list, show desktop
+- 🔊 **Volume & media** — volume up/down/set 40%, mute, pause/next track
+- 📸 **Screenshots** — saved to `~/Pictures`
+- 💻 **System control** — battery/CPU/memory reports, lock screen, shutdown/restart (with confirmation)
+- ⌨️ **Input automation** — "type hello world", "press enter", "copy", "scroll down", "click"
+- 🕒 **Info** — time, date, weather via wttr.in (no API key needed), jokes
+- 🤖 **Optional AI brain** — set `OPENROUTER_API_KEY` and anything unmatched goes to your OpenRouter model (`stealth/ox-alpha` by default)
+- 🖥️ **Desktop overlay** — a small always-on-top pill shows Listening / Working / Speaking state
 
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
-Set your Gemini API key as an environment variable:
+Linux system packages used automatically when present: `xdotool`, `pactl`/`amixer`,
+`gnome-screenshot`/`scrot`. On Debian/Ubuntu: `sudo apt install xdotool pulseaudio-utils`.
+
+Optional environment variables:
 
 ```bash
-export GENAI_API_KEY="your-key-here"
+export OPENROUTER_API_KEY="sk-or-..."          # enables AI chat fallback
+export OPENROUTER_MODEL="stealth/ox-alpha"     # any OpenRouter model id
+export ASSISTANT_NAME="Jarvis"       # rename the assistant
+export WAKE_WORDS="jarvis,jarves"    # custom wake words
+export WEATHER_CITY_DEFAULT="Mumbai" # default city for "what's the weather"
 ```
-
-Optional: set `OWM_API_KEY` for weather support (free key at
-[openweathermap.org](https://openweathermap.org)).
-
-> ⚠️ `config.py` currently contains a fallback API key — remove it before committing
-> or sharing this repo, and rotate any key that was committed.
 
 ## Run
 
 ```bash
-# GUI mode (chat window with mic toggle)
-python gui.py
+# Full experience: voice + desktop overlay
+.venv/bin/python alexa.py
 
-# Terminal voice mode
-python main.py
+# Voice without the overlay window
+.venv/bin/python alexa.py --no-gui
+
+# Every phrase is a command (no wake word needed)
+.venv/bin/python alexa.py --no-wake
+
+# No microphone? Type commands instead
+.venv/bin/python alexa.py --text
 ```
 
-Say "exit", "bye", or "quit" to leave terminal mode.
+Say **"exit"**, **"quit"**, or **"goodbye"** to stop.
 
 ## Example commands
 
-- "open chrome" · "close firefox" · "list windows"
-- "search file report.pdf" · "create folder projects"
-- "type hello world" · "press enter" · "copy" · "paste"
-- "system info" · "what time is it" · "weather in london"
+| Say this | What happens |
+|---|---|
+| "alexa open youtube" | Chrome opens youtube.com |
+| "alexa play shape of you" | YouTube search for the song |
+| "alexa search google for python asyncio" | Google search results |
+| "alexa open vscode" | VS Code launches |
+| "alexa close chrome" | All Chrome processes quit |
+| "alexa minimize" / "show desktop" | Window management |
+| "alexa volume up" / "set volume to 30" | PulseAudio/ALSA control |
+| "alexa take a screenshot" | Saved to ~/Pictures |
+| "alexa what's the weather in delhi" | Live wttr.in report |
+| "alexa system status" | CPU / memory / disk / battery |
+| "alexa lock screen" / "shutdown the computer" | Session control (confirm) |
+| "alexa tell me a joke" | Programmer humour |
 
-Anything else is handled as normal chat by Gemini through Honey's personality.
+## Notes
+
+- Speech recognition uses Google's free web service, so an internet connection is required for voice input; TTS works offline via eSpeak.
+- The desktop pill uses GTK3 (`python3-gi`, preinstalled on GNOME). Without it the assistant still runs voice-only.
+- On GNOME-Wayland sessions some window tools (xdotool/pyautogui) only affect XWayland windows, and silent screenshots may be sandboxed — everything degrades to a spoken "couldn't do that" instead of crashing.
+- The old Python prototype and its Windows-only paths were removed — everything here runs natively on Linux (macOS/Windows app launching is supported where noted). A legacy Rust edition remains archived under [`honey-rs/`](honey-rs).
+- ⚠️ An old commit of this repo once contained a hardcoded Gemini API key in `config.py`. That file is gone, but revoke/rotate that key in Google AI Studio if you ever used it. Keep your OpenRouter key out of the code — always export it as an environment variable.
