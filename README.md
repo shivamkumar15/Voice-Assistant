@@ -22,7 +22,7 @@ Say **"Alexa"** followed by a command and it actually does the thing:
                                                   └─ info.py         time · date · weather · jokes · AI chat
                    │
                    ▼
-              mouth.py (text-to-speech reply)  +  overlay GUI status pill
+              mouth.py (text-to-speech reply)  +  chat window GUI (gui.py)
 ```
 
 ## Features
@@ -38,7 +38,7 @@ Say **"Alexa"** followed by a command and it actually does the thing:
 - ⌨️ **Input automation** — "type hello world", "press enter", "copy", "scroll down", "click"
 - 🕒 **Info** — time, date, weather via wttr.in (no API key needed), jokes
 - 🤖 **Optional AI brain** — set `OPENROUTER_API_KEY` and anything unmatched goes to your OpenRouter model (`stealth/ox-alpha` by default)
-- 🖥️ **Desktop overlay** — a small always-on-top pill shows Listening / Working / Speaking state
+- 🖥️ **Proper chat GUI** — a full chat window: live transcript with bubbles, text input, quick-command buttons, mic & voice-reply toggles, and a Listening / Working / Speaking status light
 
 ## Setup
 
@@ -63,16 +63,19 @@ export WEATHER_CITY_DEFAULT="Mumbai" # default city for "what's the weather"
 ## Run
 
 ```bash
-# Full experience: voice + desktop overlay
+# Full experience: chat window + wake-word voice
 .venv/bin/python alexa.py
 
-# Voice without the overlay window
-.venv/bin/python alexa.py --no-gui
+# Chat window without the microphone (typed commands only)
+.venv/bin/python alexa.py --no-mic
 
 # Every phrase is a command (no wake word needed)
 .venv/bin/python alexa.py --no-wake
 
-# No microphone? Type commands instead
+# Voice without the chat window (terminal output)
+.venv/bin/python alexa.py --no-gui
+
+# Terminal-only text mode (no window, no microphone)
 .venv/bin/python alexa.py --text
 ```
 
@@ -98,7 +101,7 @@ Say **"exit"**, **"quit"**, or **"goodbye"** to stop.
 ## Notes
 
 - Speech recognition uses Google's free web service, so an internet connection is required for voice input; TTS works offline via eSpeak.
-- The desktop pill uses GTK3 (`python3-gi`, preinstalled on GNOME). Without it the assistant still runs voice-only.
+- The chat window uses GTK3 (`python3-gi`, preinstalled on GNOME). Without it the assistant still runs voice-only in the terminal.
 - On GNOME-Wayland sessions some window tools (xdotool/pyautogui) only affect XWayland windows, and silent screenshots may be sandboxed — everything degrades to a spoken "couldn't do that" instead of crashing.
 - The old Python prototype and its Windows-only paths were removed — everything here runs natively on Linux (macOS/Windows app launching is supported where noted). A legacy Rust edition remains archived under [`honey-rs/`](honey-rs).
 - ⚠️ An old commit of this repo once contained a hardcoded Gemini API key in `config.py`. That file is gone, but revoke/rotate that key in Google AI Studio if you ever used it. Keep your OpenRouter key out of the code — always export it as an environment variable.
