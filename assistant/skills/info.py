@@ -66,8 +66,8 @@ def chat(prompt: str):
     """OpenRouter fallback for anything that isn't a known command (optional)."""
     if not OPENROUTER_API_KEY:
         return False, (
-            "That's not a command I know yet. Try: open youtube, play shape of you, "
-            "volume up, what's the weather, or take a screenshot."
+            "That's not a command I know yet. Try: open youtube, play song , "
+            "volume up,"
         )
     try:
         response = requests.post(
