@@ -8,7 +8,13 @@ from .skills import apps, info, input_control, system_ctl, web, windows
 
 class Brain:
     def __init__(self):
-        self.pending_confirm = None  # "shutdown" | "restart"
+        self.pending_confirm = None  # "shutdown" | "restart" | "logout"
+
+    _CONFIRM_ACTIONS = {
+        "shutdown": system_ctl.shutdown_computer,
+        "restart": system_ctl.restart_computer,
+        "logout": system_ctl.log_out,
+    }
 
     def handle(self, text: str) -> str:
         """Return the spoken reply for a recognised *text* command."""
@@ -18,13 +24,12 @@ class Brain:
             action = self.pending_confirm
             if re.search(r"\b(yes|yeah|yep|sure|do it|confirm|go ahead)\b", command):
                 self.pending_confirm = None
-                fn = system_ctl.shutdown_computer if action == "shutdown" else system_ctl.restart_computer
-                _, reply = fn()
+                _, reply = self._CONFIRM_ACTIONS[action]()
                 return reply
             if re.search(r"\b(no|nope|cancel|stop|don'?t|never ?mind)\b", command):
                 self.pending_confirm = None
                 return "Cancelled."
-            if not re.search(r"\b(shutdown|shut down|restart|reboot)\b", command):
+            if not re.search(r"\b(shutdown|shut down|restart|reboot|log ?out|sign ?out)\b", command):
                 self.pending_confirm = None
 
         if self._wants_shutdown(command):
@@ -33,6 +38,19 @@ class Brain:
         if self._wants_restart(command):
             self.pending_confirm = "restart"
             return "Are you sure you want me to restart the computer? Say yes or no."
+        if self._wants_logout(command):
+            self.pending_confirm = "logout"
+            return "Do you want me to log you out? Open apps will be closed. Say yes or no."
+
+        if re.search(
+            r"\b(sleep|suspend|stand ?by)\b",
+            command,
+        ) and (
+            re.match(r"^(go to |put .{0,25}to )?(sleep|suspend|stand ?by)$", command)
+            or re.search(r"\b(computer|pc|system|machine|laptop)\b", command)
+        ):
+            _, reply = system_ctl.suspend_computer()
+            return reply
 
         m = re.match(r"play\s+(.+?)\s+on\s+youtube$", command)
         if m:
@@ -112,6 +130,13 @@ class Brain:
         if re.search(r"^(show|go to)\s+(the\s+)?desktop$|minimi[sz]e everything|minimi[sz]e all", command):
             _, reply = windows.minimize_all()
             return reply
+        if re.search(
+            r"restore (my |the )?windows?|bring (everything|all (my )?windows|them) back"
+            r"|unminimi[sz]e (everything|all)",
+            command,
+        ):
+            _, reply = windows.restore_all()
+            return reply
         m = re.match(r"^(minimi[sz]e|maximi[sz]e|maximi[sz])\s*(?:the)?\s*(.*)$", command)
         if m:
             title = m.group(2).replace("window", "").strip()
@@ -141,16 +166,36 @@ class Brain:
         if re.search(r"\b(volume|sound)\b.*\b(down|decrease|lower|quieter)\b|^quieter$|^turn it down$", command):
             _, reply = system_ctl.volume_down()
             return reply
+        if re.search(r"\bmic(rophone)?\b", command) and \
+                re.fullmatch(
+                    r"(?:un)?mute(?:\s+(?:the|my))?(?:\s+(?:mic|microphone))?"
+                    r"|(?:mic|microphone)\s+(?:un)?mute",
+                    command,
+                ):
+            _, reply = system_ctl.mic_mute()
+            return reply
         if re.fullmatch(r"(mute|unmute|silence)( the)?( volume| sound)?", command):
             _, reply = system_ctl.volume_mute()
             return reply
-        m = re.search(r"volume\s+(?:to\s+)?(\d{1,3})\s*(?:percent|%)?", command)
+        m = re.search(r"volume\s+(?:set\s+)?(?:to\s+)?(\d{1,3})\s*(?:percent|%)?", command)
         if m:
             _, reply = system_ctl.volume_set(int(m.group(1)))
             return reply
 
-        if re.search(r"(take|capture)\s+(a\s+)?(screen\s?shot|snapshot)|^screenshot$", command):
-            _, reply = system_ctl.screenshot()
+        if re.search(r"\bbrightness\b.*\b(up|increase|raise|brighter)\b|^brighten( the)?( screen)?( it)?$", command):
+            _, reply = system_ctl.brightness_up()
+            return reply
+        if re.search(r"\bbrightness\b.*\b(down|decrease|lower|dim)\b|^dim( the)?( screen)?( it)?$|^darken( the)?( screen)?$", command):
+            _, reply = system_ctl.brightness_down()
+            return reply
+        m = re.search(r"brightness\s+(?:to\s+)?(\d{1,3})\s*(?:percent|%)?", command)
+        if m:
+            _, reply = system_ctl.brightness_set(int(m.group(1)))
+            return reply
+
+        if re.search(r"(take|capture|grab)\s+(an?\s+)?(screen\s?shot|snapshot)|^screenshot( of (the )?(screen|desktop))?$", command):
+            area = bool(re.search(r"\b(area|region|part|selection|section)\b", command))
+            _, reply = system_ctl.screenshot(area)
             return reply
 
         if re.search(r"\bbattery\b|\bhow much (charge|battery)\b", command):
@@ -195,6 +240,20 @@ class Brain:
             _, reply = input_control.scroll(m.group(1), amount)
             return reply
 
+        m = re.match(
+            r"^(?:move|push)\s+(?:the\s+)?mouse\s+(left|right|up|down)"
+            r"(?:\s+a\s+(bit|little|lot|ton))?$",
+            command,
+        )
+        if m:
+            distance = {"bit": 120, "little": 120, "lot": 600, "ton": 600}.get(m.group(2), 300)
+            _, reply = input_control.move_mouse(m.group(1), distance)
+            return reply
+        m = re.match(r"^(?:move|put)\s+(?:the\s+)?mouse\s+to\s+(\d{1,4})\s*[ ,]\s*(\d{1,4})$", command)
+        if m:
+            _, reply = input_control.move_mouse(x=int(m.group(1)), y=int(m.group(2)))
+            return reply
+
         if re.search(
             r"(what(?:'s| is)? the time|what time is it|tell me the time|current time|time now|\btime\b.*\b(is it|kya)\b)",
             command,
@@ -232,10 +291,13 @@ class Brain:
 
     @staticmethod
     def _wants_shutdown(c: str) -> bool:
-        if re.search(r"\b(shut ?down|power off|turn off)\b.*\b(computer|pc|system|machine|laptop|it)?\b", c):
-            return bool(re.match(r"^(shut ?down|power off|turn off)", c)) or \
-                bool(re.search(r"\b(computer|pc|system|machine|laptop)\b", c))
-        return False
+        if re.match(r"^(shut ?down|power ?off|switch off|turn off)\b", c):
+            # Don't hijack "turn off bluetooth" style requests.
+            return not re.search(
+                r"\b(bluetooth|wi-?fi|lights?|notifications?|airplane|do not disturb)\b", c
+            )
+        return bool(re.search(r"\b(computer|pc|system|machine|laptop)\b", c)
+                    and re.search(r"\b(shut ?down|power ?off|turn off)\b", c))
 
     @staticmethod
     def _wants_restart(c: str) -> bool:
@@ -243,3 +305,8 @@ class Brain:
             return bool(re.match(r"^(restart|reboot)", c)) or \
                 bool(re.search(r"\b(computer|pc|system|machine|laptop)\b", c))
         return False
+
+    @staticmethod
+    def _wants_logout(c: str) -> bool:
+        return bool(re.match(r"^(log|sign)\s?out\b", c) or
+                    re.search(r"\b(log|sign) (me )?out\b", c))

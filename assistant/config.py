@@ -25,7 +25,9 @@ WAKE_WORDS = [w.lower() for w in os.getenv(
     "WAKE_WORDS", "alexa,alex,lexa,lexi"
 ).split(",")]
 
-EXIT_PHRASES = ["exit", "quit", "goodbye", "shut down", "shutdown", "bye bye"]
+# Note: "shut down" is deliberately NOT an exit phrase — it routes to the
+# brain's power commands (which ask for confirmation) instead of quitting.
+EXIT_PHRASES = ["exit", "quit", "goodbye", "bye bye"]
 
 TTS_RATE = int(os.getenv("TTS_RATE", "175"))
 TTS_VOLUME = float(os.getenv("TTS_VOLUME", "1.0"))
