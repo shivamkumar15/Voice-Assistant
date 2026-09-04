@@ -18,11 +18,11 @@ def _load_dotenv():
 
 _load_dotenv()
 
-ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Alexa")
+ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Ninja")
 
 
 WAKE_WORDS = [w.lower() for w in os.getenv(
-    "WAKE_WORDS", "alexa,alex,lexa,lexi"
+    "WAKE_WORDS", "ninja"
 ).split(",")]
 
 # Note: "shut down" is deliberately NOT an exit phrase — it routes to the

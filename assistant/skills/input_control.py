@@ -239,6 +239,83 @@ def move_mouse(direction: str = "", distance: int = 300, x: int | None = None,
         return False, f"Mouse move failed: {exc}"
 
 
+def mouse_position():
+    """Return (x, y) of the cursor, or None when it can't be read."""
+    if hypr.available():
+        pos = hypr.cursor_pos()
+        if pos:
+            return pos
+    try:
+        pag = _pyautogui()
+        p = pag.position()
+        return int(p.x), int(p.y)
+    except Exception:
+        return None
+
+
+def _screen_size_fallback():
+    if hypr.available():
+        size = hypr.screen_size()
+        if size:
+            return size
+    try:
+        pag = _pyautogui()
+        s = pag.size()
+        return int(s.width), int(s.height)
+    except Exception:
+        return None
+
+
+_NAMED_POSITIONS = {
+    "center": (0.5, 0.5), "middle": (0.5, 0.5),
+    "top left": (0.05, 0.05), "top-left": (0.05, 0.05),
+    "top right": (0.95, 0.05), "top-right": (0.95, 0.05),
+    "bottom left": (0.05, 0.95), "bottom-left": (0.05, 0.95),
+    "bottom right": (0.95, 0.95), "bottom-right": (0.95, 0.95),
+    "top": (0.5, 0.05), "top center": (0.5, 0.05), "top centre": (0.5, 0.05),
+    "bottom": (0.5, 0.95), "bottom center": (0.5, 0.95),
+    "left": (0.05, 0.5), "middle left": (0.05, 0.5),
+    "right": (0.95, 0.5), "middle right": (0.95, 0.5),
+}
+
+
+def move_mouse_named(name: str):
+    """Move to a named screen spot like 'center' or 'top right'."""
+    key = (name or "").lower().strip()
+    if key not in _NAMED_POSITIONS:
+        return False, "Where should the mouse go?"
+    size = _screen_size_fallback()
+    if not size:
+        return False, "I can't read the screen size"
+    fx, fy = _NAMED_POSITIONS[key]
+    return move_mouse(x=int(size[0] * fx), y=int(size[1] * fy))
+
+
+def drag(direction: str = "", distance: int = 300):
+    """Press-hold left button, move, release (best effort per backend)."""
+    deltas = {"left": (-distance, 0), "right": (distance, 0),
+              "up": (0, -distance), "down": (0, distance)}
+    if direction not in deltas:
+        return False, "Which way should I drag?"
+    dx, dy = deltas[direction]
+    # ydotool has no single drag op; emulate with down/move/up via click codes.
+    if _ensure_daemon():
+        try:
+            import subprocess as _sp
+            _sp.run(["ydotool", "click", "0xC0:1"], timeout=5)
+            ok, _ = move_mouse(direction, distance)
+            _sp.run(["ydotool", "click", "0xC0:0"], timeout=5)
+            return (True, f"Dragged {direction}") if ok else (False, "Drag failed")
+        except Exception:
+            pass
+    try:
+        pag = _pyautogui()
+        pag.dragRel(dx, dy, duration=0.4)
+        return True, f"Dragged {direction}"
+    except Exception as exc:
+        return False, f"Drag failed: {exc}"
+
+
 def click(button: str = "left"):
     if _ydo("click", str(_MOUSE_BUTTONS.get(button, _MOUSE_BUTTONS["left"]))):
         return True, f"{button.capitalize()} clicked"

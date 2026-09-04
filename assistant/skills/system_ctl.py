@@ -266,3 +266,53 @@ def uptime_report():
     hours, rem = divmod(secs, 3600)
     minutes = rem // 60
     return True, f"The system has been up for {hours} hours and {minutes} minutes"
+
+
+# --- Radios / trash / clipboard -------------------------------------------------
+
+def wifi(on: bool):
+    if not shutil.which("nmcli"):
+        return False, "WiFi control needs nmcli here"
+    result = _run(["nmcli", "radio", "wifi", "on" if on else "off"])
+    if result.returncode == 0:
+        return True, f"WiFi turned {'on' if on else 'off'}"
+    return False, "I couldn't switch the WiFi"
+
+
+def bluetooth(on: bool):
+    if shutil.which("bluetoothctl"):
+        result = _run(["bluetoothctl", "power", "on" if on else "off"])
+        if result.returncode == 0:
+            return True, f"Bluetooth turned {'on' if on else 'off'}"
+    if shutil.which("rfkill"):
+        kind = "bluetooth"
+        result = _run(["rfkill", "unblock" if on else "block", kind])
+        if result.returncode == 0:
+            return True, f"Bluetooth turned {'on' if on else 'off'}"
+    return False, "Bluetooth control isn't available here"
+
+
+def empty_trash():
+    if shutil.which("gio"):
+        result = _run(["gio", "trash", "--empty"])
+        if result.returncode == 0:
+            return True, "Trash emptied"
+    return False, "I couldn't empty the trash"
+
+
+def read_clipboard():
+    """Speak back the current clipboard text (truncated)."""
+    text = ""
+    if shutil.which("wl-paste"):
+        text = _run(["wl-paste", "--no-newline"]).stdout
+    elif shutil.which("xclip"):
+        text = _run(["xclip", "-o", "-selection", "clipboard"]).stdout
+    elif shutil.which("xsel"):
+        text = _run(["xsel", "--clipboard", "--output"]).stdout
+    else:
+        return False, "No clipboard tool found here"
+    text = (text or "").strip()
+    if not text:
+        return True, "The clipboard is empty"
+    short = text if len(text) <= 140 else text[:140] + "…"
+    return True, f"Clipboard says: {short}"

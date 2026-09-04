@@ -54,11 +54,15 @@ def tell_joke():
 
 def who_are_you():
     return True, (
-        f"I'm {ASSISTANT_NAME}, your desktop assistant. I can open apps and "
-        "websites, type and click for you, move and close windows, change "
-        "volume and brightness, take screenshots, control music, lock or "
-        "sleep the computer, and answer questions. Just say my name followed "
-        "by a command."
+        f"I'm {ASSISTANT_NAME}, your desktop assistant. I listen continuously, "
+        "so just speak — no wake word needed. Chain tasks with and, like open "
+        "YouTube and play a song, or open WhatsApp and text mom hello. I can "
+        "open apps and websites, message people on WhatsApp, find text on a "
+        "page, comment on posts, set timers and reminders, switch wifi and "
+        "bluetooth, read the clipboard, type and click for you, move the mouse by "
+        "voice, scroll, drag, manage windows, change volume and brightness, "
+        "take screenshots, control music, lock or sleep the computer, and "
+        "answer questions, switch workspaces, and move windows between them."
     )
 
 

@@ -47,11 +47,13 @@ class AssistantWorker:
     receives events through the queues documented in the module docstring.
     """
 
-    def __init__(self, no_wake: bool = False, voice: bool = True, tts: bool = True):
+    def __init__(self, no_wake: bool = True, voice: bool = True, tts: bool = True):
         self.events = queue.Queue()
         self.commands = queue.Queue()
         self.stop_event = threading.Event()
         self.brain = Brain()
+        # Continuous listening is the default: every heard phrase is treated
+        # as a command. Pass no_wake=False for strict wake-word-only mode.
         self.no_wake = no_wake
         self.voice = voice
         self.mic_enabled = voice
@@ -82,10 +84,15 @@ class AssistantWorker:
                                "Microphone unavailable — you can still type commands."))
                     self.mic = None
                     self.mic_enabled = False
+            if self.no_wake:
+                mode = "continuously — just speak any command"
+            else:
+                mode = f"Say '{WAKE_WORDS[0]}' followed by a command"
             self.emit((
                 "notice",
-                f"{ASSISTANT_NAME} is awake. Say '{WAKE_WORDS[0]}' followed by a "
-                "command, or type one below. Say 'exit' to quit.",
+                f"{ASSISTANT_NAME} is awake and listening {mode}. "
+                "Say 'exit' to quit (with the wake word in continuous mode), "
+                "or type one below.",
             ))
             self.emit(("state", self._idle_state()))
             while not self.stop_event.is_set():
@@ -131,10 +138,29 @@ class AssistantWorker:
 
     def handle_voice(self, heard: str):
         self.emit(("user", heard))
+        addressed, remainder = strip_wake_word(heard)
         if self.no_wake:
-            command = heard
+            # Continuous listening: every phrase is a candidate command.
+            # A leading wake word just marks it as explicitly addressed
+            # (always answered, even when it isn't a known command).
+            if addressed and not remainder:
+                # Bare wake word -> short follow-up window.
+                self.emit(("state", "speaking"))
+                self.emit(("assistant", "Yes?"))
+                self._speak("Yes?")
+                follow_up = self._wait_follow_up()
+                if not follow_up:
+                    self.emit(("state", self._idle_state()))
+                    return
+                self.emit(("user", follow_up))
+                self.handle_command(follow_up, echo=False,
+                                    addressed=True, from_voice=True)
+            else:
+                self.handle_command(remainder if addressed else heard,
+                                    echo=False, addressed=addressed,
+                                    from_voice=True)
         else:
-            had_wake, remainder = strip_wake_word(heard)
+            had_wake, remainder = addressed, remainder
             if not had_wake:
                 return  # ignore chatter that isn't addressed to us
             if not remainder:
@@ -150,7 +176,7 @@ class AssistantWorker:
                 command = follow_up
             else:
                 command = remainder
-        self.handle_command(command, echo=False)
+            self.handle_command(command, echo=False)
 
     def _wait_follow_up(self) -> str:
         """Wait for a follow-up phrase, staying responsive to front-end commands."""
@@ -167,7 +193,8 @@ class AssistantWorker:
                 return heard
         return ""
 
-    def handle_command(self, text: str, echo: bool = True):
+    def handle_command(self, text: str, echo: bool = True,
+                         addressed: bool = True, from_voice: bool = False):
         text = (text or "").strip()
         if not text:
             return
@@ -176,7 +203,9 @@ class AssistantWorker:
             self.emit(("user", text))
 
         normalized = re.sub(r"[.!?]+$", "", text.lower().strip())
-        if normalized in EXIT_PHRASES:
+        # In continuous voice mode, exit words only count when addressed
+        # ("ninja exit") so stray chatter can't shut the assistant down.
+        if normalized in EXIT_PHRASES and (addressed or not from_voice):
             self.emit(("assistant", "Goodbye!"))
             self._speak("Goodbye!")
             self.stop_event.set()
@@ -184,9 +213,15 @@ class AssistantWorker:
 
         self.emit(("state", "working"))
         try:
-            reply = self.brain.handle(text)
+            handled, reply = self.brain.handle_chain(text)
         except Exception as exc:
-            reply = f"Something went wrong handling that: {exc}"
+            handled, reply = True, f"Something went wrong handling that: {exc}"
+        # Unaddressed background chatter that isn't a command is logged to
+        # the transcript but never spoken aloud.
+        if not handled and not addressed and from_voice:
+            print(f"(heard, not a command: {text})")
+            self.emit(("state", self._idle_state()))
+            return
         self.emit(("assistant", reply))
         self.emit(("state", "speaking"))
         self._speak(reply)

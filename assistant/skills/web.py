@@ -1,11 +1,14 @@
 """Web skill: open sites in Chrome and run searches."""
 
+import re
 import shutil
 import subprocess
 import sys
+import time
 from urllib.parse import quote_plus
 
 from ..config import BROWSER_CANDIDATES
+from . import apps
 
 # Spoken name -> URL
 SITES = {
@@ -78,6 +81,8 @@ def find_site(query: str):
     if q in SITES:
         return q, SITES[q]
     for name in sorted(SITES, key=len, reverse=True):
+        if len(name) <= 2 and q != name:
+            continue  # never fuzzy-match tiny names ("x" lives in "chrome")
         if name in q:
             return name, SITES[name]
     if q.endswith(".com") or q.endswith(".org") or q.endswith(".in"):
@@ -134,3 +139,65 @@ def youtube_search(query: str):
         return True, f"Playing {query} on YouTube"
     except Exception as exc:
         return False, f"YouTube failed: {exc}"
+
+
+def whatsapp_send(person: str, message: str):
+    """Message someone on WhatsApp Web: open chat, type, send.
+
+    Phone numbers go straight to the chat via wa.me; names are looked up
+    through WhatsApp Web's chat search (Ctrl+K). Best effort throughout —
+    the page needs a logged-in WhatsApp Web session.
+    """
+    from . import input_control
+
+    person = (person or "").strip()
+    message = (message or "").strip()
+    if not person or not message:
+        return False, "Tell me who to message and what to say"
+
+    # Phone numbers skip the search step entirely.
+    digits = re.sub(r"[^\d]", "", person)
+    if digits and len(digits) >= 7 and len(re.sub(r"[\d+ ]", "", person)) == 0:
+        url = f"https://wa.me/{digits}?text={quote_plus(message)}"
+        browser = _find_browser()
+        try:
+            if browser is None:
+                import webbrowser
+
+                webbrowser.open(url)
+            else:
+                subprocess.Popen(browser + [url])
+        except Exception as exc:
+            return False, f"Could not open WhatsApp: {exc}"
+        time.sleep(6)  # let the chat load
+        input_control.press_key("enter")  # send the prefilled message
+        return True, f"Sent to {person} on WhatsApp"
+
+    if apps.desktop_available("whatsapp"):
+        # Real desktop app installed — drive that instead of the browser.
+        apps.launch_app("whatsapp")
+        time.sleep(4)  # let the app come up
+        try:
+            from . import windows
+
+            windows.focus_window("whatsapp")  # make sure keys land in it
+            time.sleep(0.6)
+        except Exception:
+            pass
+    else:
+        ok, _ = open_website("whatsapp")
+        if not ok:
+            return False, "I couldn't open WhatsApp Web"
+        time.sleep(6)  # let WhatsApp Web load
+    input_control.press_key("escape")
+    time.sleep(0.4)
+    input_control.hotkey("control k")  # focus chat search
+    time.sleep(0.6)
+    input_control.type_text(person)
+    time.sleep(1.5)
+    input_control.press_key("enter")  # open the chat
+    time.sleep(1.0)
+    input_control.type_text(message)
+    time.sleep(0.4)
+    input_control.press_key("enter")  # send
+    return True, f"Sent to {person} on WhatsApp"

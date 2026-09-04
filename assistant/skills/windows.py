@@ -6,6 +6,7 @@ Hyprland has no real minimise — "minimise" stashes a window in a special
 workspace (see hypr.STASH) and "restore my windows" brings the stash back.
 """
 
+import re
 import shutil
 import subprocess
 
@@ -194,6 +195,86 @@ def restore_all():
         if restored:
             return True, "Your windows are back"
     return False, "Nothing is minimised"
+
+
+# --- workspaces ---------------------------------------------------------------
+
+_WORKSPACE_WORDS = {
+    "first": 1, "one": 1, "second": 2, "two": 2, "third": 3, "three": 3,
+    "fourth": 4, "four": 4, "fifth": 5, "five": 5, "sixth": 6, "six": 6,
+    "seventh": 7, "seven": 7, "eighth": 8, "eight": 8, "ninth": 9, "nine": 9,
+    "tenth": 10, "ten": 10,
+}
+
+
+def parse_workspace_number(text):
+    """'1st' / 'first' / 'workspace 2' -> int, else None. Accepts 1..20."""
+    t = (text or "").lower().strip()
+    m = re.search(r"(\d+)\s*(?:st|nd|rd|th)?\b", t)
+    if m:
+        n = int(m.group(1))
+        return n if 1 <= n <= 20 else None
+    for word, n in _WORKSPACE_WORDS.items():
+        if re.search(rf"\b{word}\b", t):
+            return n
+    return None
+
+
+def goto_workspace(number: int):
+    """Switch to workspace *number*."""
+    if number is None:
+        return False, "Which workspace? Say: go to workspace 2"
+    if hypr.available():
+        if hypr.dispatch("workspace", str(number)):
+            return True, f"Switched to workspace {number}"
+        return False, f"Couldn't switch to workspace {number}"
+    if shutil.which("xdotool"):
+        if _xdotool("set_desktop", str(number - 1)) is not None:
+            return True, f"Switched to workspace {number}"
+    return False, "Workspace switching isn't available here"
+
+
+def cycle_workspace(direction: str):
+    """Switch to the next / previous workspace."""
+    if hypr.available():
+        delta = "e+1" if direction == "next" else "e-1"
+        if hypr.dispatch("workspace", delta):
+            return True, f"Switched to the {direction} workspace"
+        return False, "Couldn't switch workspaces"
+    if shutil.which("xdotool"):
+        try:
+            cur = int(_xdotool("get_desktop") or 0)
+            total = int(_xdotool("get_num_desktops") or 1)
+            nxt = (cur + (1 if direction == "next" else -1)) % max(1, total)
+        except (TypeError, ValueError):
+            return False, "Couldn't switch workspaces"
+        if _xdotool("set_desktop", str(nxt)) is not None:
+            return True, f"Switched to the {direction} workspace"
+    return False, "Workspace switching isn't available here"
+
+
+def move_window_to_workspace(number: int, title: str = ""):
+    """Send the active (or named) window to a workspace and follow it."""
+    if number is None:
+        return False, "Which workspace? Say: move this window to workspace 2"
+    if hypr.available():
+        if title:
+            client = hypr.find_client_wait(title)
+            if not client:
+                return False, f"No window matching {title}"
+            addr = client.get("address")
+            if hypr.dispatch("movetoworkspace", f"{number},address:{addr}") \
+                    and hypr.dispatch("workspace", str(number)):
+                return True, f"Moved {title} to workspace {number}"
+            return False, f"Couldn't move {title} to workspace {number}"
+        if hypr.dispatch("movetoworkspace", str(number)):
+            return True, f"Moved the window to workspace {number}"
+        return False, "Couldn't move the window"
+    wid = _window_id(title) if title else _xdotool("getactivewindow")
+    if wid and _xdotool("set_desktop_for_window", wid, str(number - 1)) is not None:
+        _xdotool("set_desktop", str(number - 1))
+        return True, f"Moved the window to workspace {number}"
+    return False, "Couldn't move the window"
 
 
 # --- lookup helpers (X11) -------------------------------------------------------

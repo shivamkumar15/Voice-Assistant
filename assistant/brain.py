@@ -1,9 +1,11 @@
 """Brain: maps spoken phrases to skills and produces a spoken reply."""
 
 import re
+import time
 from datetime import datetime
 
-from .skills import apps, info, input_control, system_ctl, web, windows
+from .config import OPENROUTER_API_KEY
+from .skills import apps, info, input_control, reminders, system_ctl, web, windows
 
 
 class Brain:
@@ -52,6 +54,44 @@ class Brain:
             _, reply = system_ctl.suspend_computer()
             return reply
 
+        # --- Workspaces (must precede the generic open/go-to handler) ---
+        m = re.match(r"^((?:go to|switch to|move to|jump to|open))\s+(?:the\s+|my\s+)?(.+)$", command)
+        if m and "workspace" in command:
+            rest = re.sub(r"\bworkspaces?\b", "", m.group(2)).strip()
+            if re.fullmatch(r"(next|previous|prev)", rest):
+                _, reply = windows.cycle_workspace("next" if rest == "next" else "prev")
+                return reply
+            n = windows.parse_workspace_number(rest)
+            if n is not None:
+                _, reply = windows.goto_workspace(n)
+                return reply
+            if m.group(1) != "open":
+                return "Which workspace? Say: go to workspace 2"
+            # else: not really a workspace command — fall through to open/etc.
+        m = re.match(
+            r"^(?:move|send)\s+(?:(.+?)\s+)?to\s+(?:the\s+|my\s+)?workspaces?\s+(.+)$",
+            command,
+        )
+        if m:
+            what = (m.group(1) or "").strip()
+            n = windows.parse_workspace_number(m.group(2))
+            if what in ("", "this window", "the window", "active window",
+                        "this", "that", "it"):
+                _, reply = windows.move_window_to_workspace(n)
+            else:
+                _, reply = windows.move_window_to_workspace(n, what)
+            return reply
+        m = re.match(r"^(next|previous|prev)\s+(?:the\s+)?workspaces?$", command)
+        if m:
+            _, reply = windows.cycle_workspace("next" if m.group(1) == "next" else "prev")
+            return reply
+        m = re.match(r"^(?:the\s+|my\s+)?workspaces?\s+(.+)$", command)
+        if m:
+            n = windows.parse_workspace_number(m.group(1))
+            if n is not None:
+                _, reply = windows.goto_workspace(n)
+                return reply
+
         m = re.match(r"play\s+(.+?)\s+on\s+youtube$", command)
         if m:
             _, reply = web.youtube_search(m.group(1))
@@ -95,6 +135,11 @@ class Brain:
                 "",
                 m.group(1).strip(),
             ).strip()
+            # A real installed desktop app always wins over a website with
+            # a similar name ("open whatsapp" -> the app, not the web page).
+            if apps.desktop_available(target):
+                _, reply = apps.launch_app(target)
+                return reply
             hit = web.find_site(target)
             if hit:
                 _, reply = web.open_website(hit[0])
@@ -148,7 +193,12 @@ class Brain:
             command,
         )
         if m and m.group(1) not in ("window",):
-            _, reply = windows.focus_window(m.group(1))
+            ok, reply = windows.focus_window(m.group(1))
+            if not ok and apps.can_launch(m.group(1)):
+                # Not running — be a real assistant and start it instead.
+                ok2, reply2 = apps.launch_app(m.group(1))
+                if ok2:
+                    return f"{m.group(1)} wasn't running. {reply2}"
             return reply
         if re.fullmatch(r"(focus|activate)( the)? window", command) or command == "switch window":
             _, reply = input_control.hotkey("switch window")
@@ -210,6 +260,65 @@ class Brain:
             _, reply = system_ctl.uptime_report()
             return reply
 
+        # --- Timers & reminders ---
+        m = re.match(r"^(?:set )?(?:a |an )?timer for (.+)$", command)
+        if m:
+            secs, label = reminders.parse_duration(m.group(1))
+            if secs is None:
+                return "For how long? Say: set a timer for 10 minutes"
+            _, reply = reminders.set_timer(secs, label)
+            return reply
+        m = re.match(r"^remind me to (.+?) in (.+)$", command)
+        if m:
+            secs, extra = reminders.parse_duration(m.group(2))
+            if secs is None:
+                return "In how long? Say: remind me to call mom in 20 minutes"
+            label = (m.group(1) + (" " + extra if extra else "")).strip()
+            _, reply = reminders.set_timer(secs, label)
+            return reply
+        m = re.match(r"^remind me in (.+)$", command)
+        if m:
+            secs, extra = reminders.parse_duration(m.group(1))
+            if secs is None:
+                return "In how long? Say: remind me in 10 minutes"
+            _, reply = reminders.set_timer(secs, extra or "reminder")
+            return reply
+        if re.fullmatch(r"(list|show)( my)? (timers?|reminders?)", command):
+            _, reply = reminders.list_timers()
+            return reply
+        m = re.fullmatch(r"cancel(?: my| the)? (timers?|reminders?)(?: #?(\d+))?", command)
+        if m:
+            _, reply = reminders.cancel_timer(int(m.group(2)) if m.group(2) else None)
+            return reply
+
+        # --- Radios, trash, clipboard ---
+        m = re.match(r"^(turn|switch)\s+(wifi|wi-?fi|bluetooth)\s+(on|off)$", command)
+        if m:
+            kind, state = m.group(2), m.group(3) == "on"
+            fn = system_ctl.wifi if "blue" not in kind else system_ctl.bluetooth
+            _, reply = fn(state)
+            return reply
+        m = re.match(r"^(enable|disable)\s+(wifi|wi-?fi|bluetooth)$", command)
+        if m:
+            kind, state = m.group(2), m.group(1) == "enable"
+            fn = system_ctl.wifi if "blue" not in kind else system_ctl.bluetooth
+            _, reply = fn(state)
+            return reply
+        m = re.match(r"^turn\s+(on|off)\s+(?:the\s+)?(wifi|wi-?fi|bluetooth)$", command)
+        if m:
+            kind, state = m.group(2), m.group(1) == "on"
+            fn = system_ctl.wifi if "blue" not in kind else system_ctl.bluetooth
+            _, reply = fn(state)
+            return reply
+        if re.fullmatch(r"empty(?: the)? trash", command):
+            _, reply = system_ctl.empty_trash()
+            return reply
+        if re.fullmatch(r"(read|show)( me)?( my| the)? clipboard", command) or \
+                re.fullmatch(r"what('s| is)( in)?( my| the)? clipboard", command) or \
+                command == "what did i copy":
+            _, reply = system_ctl.read_clipboard()
+            return reply
+
         if re.search(r"\block\b.*\b(screen|pc|computer)\b|^lock (the |my )?(screen|pc|computer)$", command):
             _, reply = system_ctl.lock_screen()
             return reply
@@ -228,10 +337,13 @@ class Brain:
         if re.fullmatch(r"double\s*click", command):
             _, reply = input_control.double_click()
             return reply
-        if re.fullmatch(r"right\s*click", command):
+        if re.fullmatch(r"(right\s*click|click right)", command):
             _, reply = input_control.click("right")
             return reply
-        if re.fullmatch(r"click", command):
+        if re.fullmatch(r"(middle\s*click|click middle)", command):
+            _, reply = input_control.click("middle")
+            return reply
+        if re.fullmatch(r"(click|left\s*click|click left)", command):
             _, reply = input_control.click()
             return reply
         m = re.match(r"^scroll\s+(up|down)(\s+a\s+(bit|lot))?$", command)
@@ -239,6 +351,15 @@ class Brain:
             amount = 800 if m.group(3) == "lot" else 400
             _, reply = input_control.scroll(m.group(1), amount)
             return reply
+        m = re.match(r"^drag\s+(?:the\s+)?mouse\s+(left|right|up|down)$", command)
+        if m:
+            _, reply = input_control.drag(m.group(1))
+            return reply
+        if re.fullmatch(r"(where(\'s| is) (the )?mouse|mouse position)", command):
+            pos = input_control.mouse_position()
+            if pos:
+                return f"The mouse is at {pos[0]}, {pos[1]}"
+            return "I can't read the mouse position here"
 
         m = re.match(
             r"^(?:move|push)\s+(?:the\s+)?mouse\s+(left|right|up|down)"
@@ -253,6 +374,48 @@ class Brain:
         if m:
             _, reply = input_control.move_mouse(x=int(m.group(1)), y=int(m.group(2)))
             return reply
+        m = re.match(
+            r"^(?:move|put)\s+(?:the\s+)?mouse\s+to\s+(?:the\s+)?"
+            r"(center|middle|top|bottom|left|right|top left|top right|"
+            r"bottom left|bottom right|top center|top centre|bottom center|"
+            r"middle left|middle right)$",
+            command,
+        )
+        if m:
+            _, reply = input_control.move_mouse_named(m.group(1))
+            return reply
+
+        # --- Messaging & page interaction (chainable steps) ---
+        m = re.match(
+            r"^(?:send )?(?:a )?(?:whatsapp )?(?:message|text|msg)"
+            r"(?: to)? ([a-z0-9 _.'+-]{1,30}?)(?: saying | that |, |: )?(.+)$",
+            command,
+        )
+        if m:
+            _, reply = web.whatsapp_send(m.group(1).strip(), m.group(2).strip())
+            return reply
+        m = re.match(
+            r"^whatsapp ([a-z0-9 _.'+-]{1,30}?)(?: saying | that |, |: )?(.+)$",
+            command,
+        )
+        if m:
+            _, reply = web.whatsapp_send(m.group(1).strip(), m.group(2).strip())
+            return reply
+        m = re.match(r"^comment (.+) on (?:this|the|that) post$", command)
+        if m:
+            return self._comment_text(m.group(1).strip())
+        m = re.match(r"^comment (.+)$", command)
+        if m:
+            return self._comment_text(m.group(1).strip())
+        m = re.match(r"^find (.+?)(?: on (?:this |the )?page)?$", command)
+        if m:
+            query = m.group(1).strip()
+            input_control.hotkey("find")  # Ctrl+F in the browser
+            time.sleep(0.4)
+            input_control.type_text(query)
+            time.sleep(0.2)
+            input_control.press_key("enter")
+            return f"Finding {query} on this page"
 
         if re.search(
             r"(what(?:'s| is)? the time|what time is it|tell me the time|current time|time now|\btime\b.*\b(is it|kya)\b)",
@@ -288,6 +451,243 @@ class Brain:
 
         _, reply = info.chat(text)
         return reply
+
+    def _comment_text(self, text: str) -> str:
+        """Type *text* into the focused box and submit (e.g. a post comment)."""
+        ok, _ = input_control.type_text(text)
+        if not ok:
+            return "I couldn't type the comment"
+        time.sleep(0.3)
+        input_control.press_key("enter")
+        return f"Commented: {text}"
+
+    # --- chained multi-step commands -------------------------------------
+
+    _CHAIN_SEP = re.compile(r"\s*(?:;|\band then\b|\bthen\b|\band\b)\s*")
+
+    def handle_chain(self, text: str):
+        """Run one or more chained commands ("A and B and C").
+
+        Returns (handled, reply). A split only happens when *every* part
+        looks like a real command — otherwise the whole phrase is handled
+        as a single command exactly like before.
+        """
+        text = (text or "").strip()
+        if not text:
+            return False, ""
+        if self.pending_confirm:
+            return True, self.handle(text)
+        parts = self._split_chain(text)
+        if len(parts) == 1:
+            if self._is_known_command(parts[0]):
+                return True, self.handle(parts[0])
+            return False, self.handle(parts[0])
+        replies = []
+        for i, part in enumerate(parts):
+            replies.append(self.handle(part))
+            if i < len(parts) - 1:
+                time.sleep(2.0 if self._needs_settle(part) else 0.6)
+        return True, ". ".join(replies)
+
+    def _split_chain(self, text: str):
+        """Split into command steps, or [text] when splitting is unsafe."""
+        lowered = text.lower().strip()
+        # Never split typed/dictated content — "and" may be literal text.
+        if re.match(r"^(type|write)\s+.+$", lowered):
+            return [text]
+        raw = [p.strip(" ,.!?") for p in self._CHAIN_SEP.split(text)]
+        parts = [p for p in raw if p]
+        if len(parts) < 2:
+            return [text]
+        if all(self._is_known_command(p) for p in parts):
+            return parts
+        return [text]
+
+    @staticmethod
+    def _needs_settle(part: str) -> bool:
+        """Steps that load pages/apps need a pause before the next step."""
+        return bool(re.match(
+            r"^(open|go to|launch|visit|start|play|search|look up|"
+            r"whatsapp|message|text|send|find)\b",
+            part.lower().strip(),
+        ))
+
+    def _is_known_command(self, text: str) -> bool:
+        """Pure check mirroring handle(): True when *text* parses as a command.
+
+        No skills are executed here — used to validate chain splits and to
+        silence background chatter in continuous-listening mode.
+        """
+        c = text.lower().strip()
+        if not c:
+            return False
+        if self.pending_confirm:
+            return True
+        if OPENROUTER_API_KEY:
+            return True  # AI fallback answers everything
+        # NOTE: EXIT_PHRASES intentionally not listed — stray voice "quit"
+        # must stay silent; real exits are caught by the caller first.
+        if self._wants_shutdown(c) or self._wants_restart(c) or self._wants_logout(c):
+            return True
+        if re.search(r"\bsleep\b|\bsuspend\b|\bstand ?by\b", c):
+            return True
+        if re.match(r"play\s+.+\s+on\s+youtube$", c):
+            return True
+        if re.match(r"search\s+.+\s+on\s+youtube$", c):
+            return True
+        if re.match(
+            r"^(?:google\s+search\s+(?:for\s+)?"
+            r"|search\s+(?:(?:the\s+)?(?:web|internet)\s+)?(?:for\s+)?"
+            r"|look\s+up\s+(?:for\s+)?)(.+)", c,
+        ):
+            return True
+        if re.match(r"^next (song|track|video)$", c):
+            return True
+        if re.match(r"^(pause|resume|stop)\s*(the )?(music|video|song|playback)?$", c):
+            return True
+        if re.match(r"^play\s+(.+)$", c):
+            return True
+        m = re.match(r"^(?:open|go\s+to|launch|visit|start)\s+(.+?)$", c)
+        if m and c != "start music":
+            import shutil as _shutil
+
+            target = re.sub(
+                r"\s+(website|site|page|dot com|\.com|in browser|in chrome|app|application)$",
+                "", m.group(1).strip(),
+            ).strip()
+            if web.find_site(target) or target in apps.APPS:
+                return True
+            if _shutil.which(target.replace(" ", "-")):
+                return True
+            if "workspace" in c:
+                pass  # maybe a workspace command — checked below
+            else:
+                return False
+        if re.match(r"^open\s+(?:the\s+)?file\s+(.+)", c):
+            return True
+        if re.match(r"^close\s+(?:the\s+)?.+$", c):
+            if re.fullmatch(r"(close|close the) window", c):
+                return True
+            return "tab" not in c
+        if re.search(r"^(show|go to)\s+(the\s+)?desktop$|minimi[sz]e everything|minimi[sz]e all", c):
+            return True
+        if re.search(r"restore (my |the )?windows?|bring (everything|all (my )?windows|them) back"
+                      r"|unminimi[sz]e (everything|all)", c):
+            return True
+        if re.match(r"^(minimi[sz]e|maximi[sz]e|maximi[sz])\s*(?:the)?\s*(.*)$", c):
+            return True
+        if re.match(r"^(?:focus|switch to|bring up|activate)\s+(?:the\s+)?.+$", c):
+            return True
+        if re.fullmatch(r"(focus|activate)( the)? window", c) or c == "switch window":
+            return True
+        if re.match(r"^(list|what are|show me)\s+(?:the\s+)?(?:open\s+)?windows?", c):
+            return True
+        if re.search(r"\b(volume|sound)\b.*\b(up|increase|raise|louder)\b|^louder$|^turn it up$", c):
+            return True
+        if re.search(r"\b(volume|sound)\b.*\b(down|decrease|lower|quieter)\b|^quieter$|^turn it down$", c):
+            return True
+        if re.search(r"\bmic(rophone)?\b", c):
+            return True
+        if re.fullmatch(r"(mute|unmute|silence)( the)?( volume| sound)?", c):
+            return True
+        if re.search(r"volume\s+(?:set\s+)?(?:to\s+)?(\d{1,3})\s*(?:percent|%)?", c):
+            return True
+        if re.search(r"\bbrightness\b", c):
+            return True
+        if re.search(r"(take|capture|grab)\s+(an?\s+)?(screen\s?shot|snapshot)"
+                      r"|^screenshot( of (the )?(screen|desktop))?$", c):
+            return True
+        if re.search(r"\bbattery\b|\bhow much (charge|battery)\b", c):
+            return True
+        if re.search(r"\b(cpu|memory|ram|disk|system status|system info)\b", c):
+            return True
+        if re.match(r"^how('?s| is) (my )?(computer|pc|system)( doing)?$", c):
+            return True
+        if re.search(r"\buptime\b|^how long .* been (on|running|up)", c):
+            return True
+        # Workspaces (mirrors the handlers above).
+        m = re.match(r"^((?:go to|switch to|move to|jump to|open))\s+(?:the\s+|my\s+)?(.+)$", c)
+        if m and "workspace" in c:
+            rest = re.sub(r"\bworkspaces?\b", "", m.group(2)).strip()
+            if re.fullmatch(r"(next|previous|prev)", rest):
+                return True
+            if windows.parse_workspace_number(rest) is not None:
+                return True
+            if m.group(1) != "open":
+                return True  # handled as a "which workspace?" prompt
+        if re.match(r"^(?:move|send)\s+(?:(.+?)\s+)?to\s+(?:the\s+|my\s+)?workspaces?\s+.+$", c):
+            return True
+        if re.match(r"^(next|previous|prev)\s+(?:the\s+)?workspaces?$", c):
+            return True
+        m = re.match(r"^(?:the\s+|my\s+)?workspaces?\s+(.+)$", c)
+        if m and windows.parse_workspace_number(m.group(1)) is not None:
+            return True
+        if re.match(r"^(?:set )?(?:a |an )?timer for .+$", c):
+            return True
+        if re.match(r"^remind me (to .+ in .+|in .+)$", c):
+            return True
+        if re.fullmatch(r"(list|show)( my)? (timers?|reminders?)", c):
+            return True
+        if re.fullmatch(r"cancel(?: my| the)? (timers?|reminders?)(?: #?\d+)?", c):
+            return True
+        if re.match(r"^(turn|switch|enable|disable)\s+(wifi|wi-?fi|bluetooth)\b", c):
+            return True
+        if re.match(r"^turn\s+(on|off)\s+(?:the\s+)?(wifi|wi-?fi|bluetooth)$", c):
+            return True
+        if re.fullmatch(r"empty(?: the)? trash", c):
+            return True
+        if re.search(r"\bclipboard\b|what did i copy", c):
+            return True
+        if re.search(r"\block\b", c):
+            return True
+        if re.match(r"^(?:type|write)\s+(.+)$", c):
+            return True
+        if c in input_control._COMBO_WORDS:
+            return True
+        if re.match(r"^press\s+(?:the\s+)?.+$", c):
+            return True
+        if re.fullmatch(r"double\s*click", c):
+            return True
+        if re.fullmatch(r"(right\s*click|click right|middle\s*click|click middle"
+                        r"|click|left\s*click|click left)", c):
+            return True
+        if re.match(r"^scroll\s+(up|down)", c):
+            return True
+        if re.match(r"^drag\s+(?:the\s+)?mouse\s+(left|right|up|down)$", c):
+            return True
+        if re.fullmatch(r"(where(\'s| is) (the )?mouse|mouse position)", c):
+            return True
+        if re.match(r"^(?:move|push)\s+(?:the\s+)?mouse\s+(left|right|up|down)", c):
+            return True
+        if re.match(r"^(?:move|put)\s+(?:the\s+)?mouse\s+to\s+", c):
+            return True
+        if re.match(r"^(?:send )?(?:a )?(?:whatsapp )?(?:message|text|msg)(?: to)? .+ .+$", c):
+            return True
+        if re.match(r"^whatsapp .+ .+$", c):
+            return True
+        if re.match(r"^comment .+$", c):
+            return True
+        if re.match(r"^find .+$", c):
+            return True
+        if re.search(r"(what(?:'s| is)? the time|what time is it|tell me the time"
+                      r"|current time|time now)", c):
+            return True
+        if re.search(r"\b(date|day is it today|today'?s date|what day)\b", c):
+            return True
+        if re.search(r"\bweather\b", c):
+            return True
+        if re.search(r"\bjoke\b", c):
+            return True
+        if re.search(r"who are you|what are you|what can you do|your name"
+                      r"|introduce yourself|^help$|^help me$", c):
+            return True
+        if re.match(r"^(hi|hello|hey|yo|good (morning|afternoon|evening)|namaste)\b", c):
+            return True
+        if re.search(r"\bthank(s| you)\b", c):
+            return True
+        if re.search(r"\bhow are you\b", c):
+            return True
+        return False
 
     @staticmethod
     def _wants_shutdown(c: str) -> bool:
