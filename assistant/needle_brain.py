@@ -22,8 +22,7 @@ sentence imperative descriptions with explicit disambiguation cues, closed
 value sets as Literals, bounded numbers, and human time phrases copied
 verbatim for the host to resolve. Every call is gated on Needle's
 calibrated confidence *before* it touches the desktop: below
-NEEDLE_CONFIDENCE — or NEEDLE_CHATTER_CONFIDENCE for phrases heard in the
-background without the wake word — the phrase is handed back instead. The
+NEEDLE_CONFIDENCE the phrase is handed back instead. The
 loop is driven manually with agent.complete() for exactly that reason —
 agent.run() would execute tools before we could veto them.
 """
@@ -34,12 +33,7 @@ import re
 from pathlib import Path
 from typing import Annotated, Literal
 
-from .config import (
-    NEEDLE_CHATTER_CONFIDENCE,
-    NEEDLE_CONFIDENCE,
-    NEEDLE_ENABLED,
-    NEEDLE_WEIGHTS,
-)
+from .config import NEEDLE_CONFIDENCE, NEEDLE_ENABLED, NEEDLE_WEIGHTS
 
 # Safety cap on agentic steps per phrase (open X, then do Y, then Z...).
 MAX_STEPS = 5
@@ -88,7 +82,7 @@ _VERBATIM_ARGS = {
 DOMAINS = {
     "apps": ["open_app_or_site", "close_app", "search_web", "send_whatsapp_message"],
     "media": ["play_on_youtube", "play_pause_media", "next_track", "previous_track"],
-    "sound": ["set_volume", "change_volume", "mute_volume"],
+    "sound": ["set_volume", "change_volume"],
     "screen": ["set_brightness", "change_brightness"],
     "windows": ["focus_window", "close_window", "minimize_window",
                 "maximize_window", "show_desktop", "restore_windows"],
@@ -174,6 +168,13 @@ def _build_tools(needle):
         Args:
             query: What to search for, copied word for word.
         """
+        # A bare keyword list is a Google query; a full sentence is usually
+        # a question or chat, not a command — refuse and let the AI chat
+        # answer it instead of opening search tabs.
+        if len(query.split()) >= 6 and re.search(
+                r"\b(what|who|why|how|when|where|tell me|do you|can you)\b",
+                query.lower()):
+            return False, ""
         return web.google_search(query)
 
     @tool
@@ -183,7 +184,7 @@ def _build_tools(needle):
         Args:
             query: The song, artist, or video, copied word for word.
         """
-        return web.youtube_search(query)
+        return web.play_query(query)
 
     @tool
     def send_whatsapp_message(contact: str, message: str):
@@ -643,12 +644,12 @@ class NeedleBrain:
         handled is True only when a tool actually executed; router misses,
         refusals (off-topic empty calls), weak confidence and errors all
         return False so the caller can fall back to the regex brain / chat.
-        *strict* raises the confidence bar for phrases heard in the
-        background (no wake word) so overheard chatter can't act.
+        *strict* is kept for API compatibility; on-device inference is fast
+        and the calibrated head is what protects against chatter, so voice
+        and typed input share the same gate.
         """
         if not self.available:
             return False, ""
-        min_confidence = NEEDLE_CHATTER_CONFIDENCE if strict else NEEDLE_CONFIDENCE
         agent = self._agent_for(route_domain(text))
         says = []
         done = set()
@@ -659,7 +660,7 @@ class NeedleBrain:
                 if response.get("type") != "call" or not calls:
                     break  # loop done, or the phrase was refused (empty call)
                 confidence = response.get("confidence")
-                if confidence is not None and confidence < min_confidence:
+                if confidence is not None and confidence < NEEDLE_CONFIDENCE:
                     agent.reset()  # drop the half-matched exchange
                     return False, ""
                 if any(not self._args_verbatim(text, call) for call in calls):

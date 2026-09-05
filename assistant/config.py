@@ -33,6 +33,19 @@ TTS_RATE = int(os.getenv("TTS_RATE", "175"))
 TTS_VOLUME = float(os.getenv("TTS_VOLUME", "1.0"))
 TTS_VOICE_HINT = os.getenv("TTS_VOICE_HINT", "english")  # espeak voice filter
 
+# Piper neural TTS (sounds like Jarvis, not a 90s robot). Download a voice
+# .onnx(+.json) from huggingface.co/rhasspy/piper-voices and point
+# TTS_PIPER_VOICE at it, or `pacman -S piper-bin` / paru -S piper and set
+# TTS_PIPER_VOICE_NAME (e.g. "en_US-ryan-high" or "en_GB-alan-medium").
+TTS_PIPER_VOICE = os.getenv("TTS_PIPER_VOICE", "")       # path to .onnx
+TTS_PIPER_VOICE_NAME = os.getenv("TTS_PIPER_VOICE_NAME", "")
+TTS_PIPER_LENGTH_SCALE = os.getenv("TTS_PIPER_LENGTH_SCALE", "")  # <1 = faster
+
+# Where the assistant downloads/looks for Piper voices.
+PIPER_VOICE_DIR = Path(os.getenv(
+    "PIPER_VOICE_DIR", str(Path.home() / ".local" / "share" / "piper" / "voices")
+))
+
 MIC_DEVICE_INDEX = None        
 PHRASE_TIME_LIMIT = 8           
 LISTEN_TIMEOUT = 6               

@@ -7,6 +7,8 @@ import sys
 import time
 from urllib.parse import quote_plus
 
+import requests
+
 from ..config import BROWSER_CANDIDATES
 from . import apps
 
@@ -125,10 +127,32 @@ def google_search(query: str):
         return False, f"Search failed: {exc}"
 
 
-def youtube_search(query: str):
-    """Play/search something on YouTube."""
-    browser = _find_browser()
+def youtube_search(query: str, autoplay: bool = True):
+    """Play/search something on YouTube.
+
+    With *autoplay*, the first result's video is opened directly (the watch
+    page starts playing on its own) instead of dropping the user on the
+    search results — "play X" should mean play, not browse.
+    """
     url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+    playing = False
+    if autoplay:
+        try:
+            page = requests.get(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                timeout=8,
+            )
+            first = re.search(r'"videoId":"([\w-]{11})"', page.text)
+            if first:
+                url = f"https://www.youtube.com/watch?v={first.group(1)}"
+                playing = True
+        except requests.RequestException:
+            pass  # no network / parse fail — fall back to the results page
+    browser = _find_browser()
     try:
         if browser is None:
             import webbrowser
@@ -136,9 +160,35 @@ def youtube_search(query: str):
             webbrowser.open(url)
         else:
             subprocess.Popen(browser + [url])
-        return True, f"Playing {query} on YouTube"
+        if playing:
+            return True, f"Playing {query} on YouTube"
+        return True, f"Searching YouTube for {query}"
     except Exception as exc:
         return False, f"YouTube failed: {exc}"
+
+
+# Generic "play music" style requests — the user wants *music*, not a video
+# literally called "song" or "music".
+_GENERIC_PLAY = frozenset({
+    "music", "some music", "a song", "the song", "song", "songs",
+    "some songs", "that song", "something", "anything", "my playlist",
+    "a playlist", "some tunes", "tunes", "a track", "tracks",
+})
+
+
+def play_query(query: str):
+    """Handle a "play ..." request: named content plays on YouTube; a
+    generic request resumes paused media or starts a default mix."""
+    if (query or "").strip().lower() in _GENERIC_PLAY:
+        from . import system_ctl
+
+        state = system_ctl.media_state()
+        if state == "paused":
+            return system_ctl.media_key("playpause")
+        if state == "playing":
+            return True, "Already playing"
+        return youtube_search("top hits mix")
+    return youtube_search((query or "").strip())
 
 
 def whatsapp_send(person: str, message: str):

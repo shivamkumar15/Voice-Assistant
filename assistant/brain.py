@@ -106,11 +106,11 @@ class Brain:
 
         m = re.match(r"play\s+(.+?)\s+on\s+youtube$", command)
         if m:
-            _, reply = web.youtube_search(m.group(1))
+            _, reply = web.youtube_search(m.group(1), autoplay=False)
             return reply
         m = re.match(r"search\s+(?:for\s+)?(.+?)\s+on\s+youtube$", command)
         if m:
-            _, reply = web.youtube_search(m.group(1))
+            _, reply = web.youtube_search(m.group(1), autoplay=False)
             return reply
 
         m = re.match(
@@ -127,17 +127,22 @@ class Brain:
         if re.match(r"^next (song|track|video)$", command):
             _, reply = system_ctl.media_key("next")
             return reply
+        m = re.match(r"^(?:go back|previous|rewind)(?: to)? (?:the )?"
+                     r"(?:previous |last |prior )?(?:song|track|video)$",
+                     command)
+        if m:
+            _, reply = system_ctl.media_key("previous")
+            return reply
         if re.match(r"^(pause|resume|stop)\s*(the )?(music|video|song|playback)?$", command):
             _, reply = system_ctl.media_key("playpause")
+            return reply
+        if re.match(r"^skip( (this|the)? ?(song|track|video))?$", command):
+            _, reply = system_ctl.media_key("next")
             return reply
 
         m = re.match(r"^play\s+(.+)$", command)
         if m:
-            query = m.group(1).strip()
-            if query in ("music", "some music", "a song", "something", "my playlist"):
-                _, reply = system_ctl.media_key("playpause")
-            else:
-                _, reply = web.youtube_search(query)
+            _, reply = web.play_query(m.group(1).strip())
             return reply
 
         m = re.match(r"^(?:open|go\s+to|launch|visit|start)\s+(.+?)$", command)
@@ -222,10 +227,16 @@ class Brain:
             _, reply = windows.close_window()
             return reply
 
-        if re.search(r"\b(volume|sound)\b.*\b(up|increase|raise|louder)\b|^louder$|^turn it up$", command):
+        if re.search(r"\b(volume|sound)\b.*\b(up|increase|raise|louder)\b"
+                     r"|^(go|come|turn|crank|pump)(?: the)? (?:volume|sound|music)? ?up$"
+                     r"|^(increase|raise|crank|pump)(?: the)? (?:volume|sound)$"
+                     r"|^(louder|up)$|^turn it up$|^crank it( up)?$|^ pump it$", command):
             _, reply = system_ctl.volume_up()
             return reply
-        if re.search(r"\b(volume|sound)\b.*\b(down|decrease|lower|quieter)\b|^quieter$|^turn it down$", command):
+        if re.search(r"\b(volume|sound)\b.*\b(down|decrease|lower|quieter)\b"
+                     r"|^(go|come|turn)(?: the)? (?:volume|sound|music)? ?down$"
+                     r"|^(decrease|lower)(?: the)? (?:volume|sound)$"
+                     r"|^(quieter|down)$|^turn it down$", command):
             _, reply = system_ctl.volume_down()
             return reply
         if re.search(r"\bmic(rophone)?\b", command) and \
@@ -236,7 +247,7 @@ class Brain:
                 ):
             _, reply = system_ctl.mic_mute()
             return reply
-        if re.fullmatch(r"(mute|unmute|silence)( the)?( volume| sound)?", command):
+        if re.fullmatch(r"(mute|unmute|silence)( the| my)?( volume| sound| speakers?| audio)?", command):
             _, reply = system_ctl.volume_mute()
             return reply
         m = re.search(r"volume\s+(?:set\s+)?(?:to\s+)?(\d{1,3})\s*(?:percent|%)?", command)
@@ -244,10 +255,17 @@ class Brain:
             _, reply = system_ctl.volume_set(int(m.group(1)))
             return reply
 
-        if re.search(r"\bbrightness\b.*\b(up|increase|raise|brighter)\b|^brighten( the)?( screen)?( it)?$", command):
+        if re.search(r"\bbrightness\b.*\b(up|increase|raise|brighter)\b"
+                     r"|^(go|come|turn)(?: the)? (?:brightness|screen)? ?up$"
+                     r"|^(increase|raise)(?: the)? (?:brightness|screen)$"
+                     r"|^brighter$|^brighten( the)?( screen)?( it)?( up)?$|^light it up$", command):
             _, reply = system_ctl.brightness_up()
             return reply
-        if re.search(r"\bbrightness\b.*\b(down|decrease|lower|dim)\b|^dim( the)?( screen)?( it)?$|^darken( the)?( screen)?$", command):
+        if re.search(r"\bbrightness\b.*\b(down|decrease|lower|dim)\b"
+                     r"|^(go|come|turn)(?: the)? (?:brightness|screen)? ?down$"
+                     r"|^(decrease|lower)(?: the)? (?:brightness|screen)$"
+                     r"|^dimmer$|^dim( the)?( screen)?( it)?( down)?$"
+                     r"|^darken( the)?( screen)?( it)?$", command):
             _, reply = system_ctl.brightness_down()
             return reply
         m = re.search(r"brightness\s+(?:to\s+)?(\d{1,3})\s*(?:percent|%)?", command)
@@ -575,7 +593,12 @@ class Brain:
             return True
         if re.match(r"^next (song|track|video)$", c):
             return True
+        if re.match(r"^(?:go back|previous|rewind)(?: to)? (?:the )?"
+                    r"(?:previous |last |prior )?(?:song|track|video)$", c):
+            return True
         if re.match(r"^(pause|resume|stop)\s*(the )?(music|video|song|playback)?$", c):
+            return True
+        if re.match(r"^skip( (this|the)? ?(song|track|video))?$", c):
             return True
         if re.match(r"^play\s+(.+)$", c):
             return True
@@ -614,17 +637,32 @@ class Brain:
             return True
         if re.match(r"^(list|what are|show me)\s+(?:the\s+)?(?:open\s+)?windows?", c):
             return True
-        if re.search(r"\b(volume|sound)\b.*\b(up|increase|raise|louder)\b|^louder$|^turn it up$", c):
+        if re.search(r"\b(volume|sound)\b.*\b(up|increase|raise|louder)\b"
+                     r"|^(go|come|turn|crank|pump)(?: the)? (?:volume|sound|music)? ?up$"
+                     r"|^(increase|raise|crank|pump)(?: the)? (?:volume|sound)$"
+                     r"|^(louder|up)$|^turn it up$|^crank it( up)?$|^ pump it$", c):
             return True
-        if re.search(r"\b(volume|sound)\b.*\b(down|decrease|lower|quieter)\b|^quieter$|^turn it down$", c):
+        if re.search(r"\b(volume|sound)\b.*\b(down|decrease|lower|quieter)\b"
+                     r"|^(go|come|turn)(?: the)? (?:volume|sound|music)? ?down$"
+                     r"|^(decrease|lower)(?: the)? (?:volume|sound)$"
+                     r"|^(quieter|down)$|^turn it down$", c):
             return True
         if re.search(r"\bmic(rophone)?\b", c):
             return True
-        if re.fullmatch(r"(mute|unmute|silence)( the)?( volume| sound)?", c):
+        if re.fullmatch(r"(mute|unmute|silence)( the| my)?( volume| sound| speakers?| audio)?", c):
             return True
         if re.search(r"volume\s+(?:set\s+)?(?:to\s+)?(\d{1,3})\s*(?:percent|%)?", c):
             return True
-        if re.search(r"\bbrightness\b", c):
+        if re.search(r"\bbrightness\b.*\b(up|increase|raise|brighter)\b"
+                     r"|^(go|come|turn)(?: the)? (?:brightness|screen)? ?up$"
+                     r"|^(increase|raise)(?: the)? (?:brightness|screen)$"
+                     r"|^brighter$|^brighten( the)?( screen)?( it)?( up)?$|^light it up$", c):
+            return True
+        if re.search(r"\bbrightness\b.*\b(down|decrease|lower|dim)\b"
+                     r"|^(go|come|turn)(?: the)? (?:brightness|screen)? ?down$"
+                     r"|^(decrease|lower)(?: the)? (?:brightness|screen)$"
+                     r"|^dimmer$|^dim( the)?( screen)?( it)?( down)?$"
+                     r"|^darken( the)?( screen)?( it)?$", c):
             return True
         if re.search(r"(take|capture|grab)\s+(an?\s+)?(screen\s?shot|snapshot)"
                       r"|^screenshot( of (the )?(screen|desktop))?$", c):

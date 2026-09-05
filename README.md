@@ -73,6 +73,13 @@ telemetry and a bottom command bar — like the reference mockup.
   desktop app preferred over the website when installed
 - ⏲️ **Timers & reminders** — "set a timer for 10 minutes", "remind me to call
   mom in 20 minutes" (voice + desktop notification when they fire)
+- 🔊 **Real playback** — "play believer" opens the video itself (autoplays),
+  "play song" / "play music" resumes what's paused or starts a top-hits mix,
+  "search lofi on youtube" still gives the results page; pause/next/previous
+  target every registered player, with a global media-key fallback when none
+  are open
+- 📡 **WiFi joining** — "connect to wifi" bounces the radio to rejoin your saved
+  network; "connect to Starbucks WiFi" joins by name
 - 📻 **Radios & desktop bits** — "turn wifi off", "switch bluetooth on",
   "read my clipboard", "empty the trash"
 - 🪟 **Windows & workspaces** — "focus / minimise / maximise <app>",
@@ -207,7 +214,7 @@ Say **"exit"**, **"quit"**, or **"goodbye"** to stop.
   If Needle ever acts on background chatter, raise `NEEDLE_CHATTER_CONFIDENCE`.
 
 - Some laptops boot with the internal mic boost maxed out (+30dB), which makes the mic nothing but noise — the assistant tones it down automatically at every startup.
-- Speech recognition uses Google's free web service, so an internet connection is required for voice input; TTS works offline via eSpeak.
+- Speech recognition uses Google's free web service, so an internet connection is required for voice input. Replies speak through **Piper** neural TTS (a natural British voice, downloaded once on first use into `~/.local/share/piper/voices`; set `TTS_PIPER_VOICE_NAME` or `TTS_PIPER_VOICE` to choose another from rhasspy/piper-voices) and fall back to eSpeak if Piper is unavailable.
 - The HUD uses GTK3 (`python3-gi`, preinstalled on GNOME). Without it the assistant still runs voice-only in the terminal.
 - On Hyprland the assistant controls the desktop through `hyprctl` and `ydotool` (uinput), so native Wayland windows are fully supported. On other Wayland desktops some tools (xdotool/pyautogui) only affect XWayland windows, and everything degrades to a spoken "couldn't do that" instead of crashing.
 - "Minimise" on Hyprland stashes windows in a special workspace called `assistant` — "restore my windows" toggles it back.

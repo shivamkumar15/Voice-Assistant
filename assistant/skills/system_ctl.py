@@ -77,6 +77,7 @@ def mic_mute():
 
 def _brightness_pct() -> int:
     try:
+        time.sleep(0.15)  # amdgpu backlight updates asynchronously after a set
         cur = int(_run(["brightnessctl", "get"]).stdout.strip() or 0)
         top = int(_run(["brightnessctl", "max"]).stdout.strip() or 1)
         return max(0, min(100, round(cur * 100 / top)))
@@ -110,11 +111,29 @@ def brightness_set(level: int):
 
 # --- Media keys ---------------------------------------------------------------
 
+def media_state() -> str:
+    """Best-effort playback state across registered players: playing/paused/stopped."""
+    if shutil.which("playerctl"):
+        result = _run(["playerctl", "status"])
+        out = (result.stdout or "").strip().lower()
+        if "playing" in out:
+            return "playing"
+        if "paused" in out:
+            return "paused"
+    return "stopped"
+
+
 def media_key(key: str):
-    """key in: playpause, next, previous"""
+    """key in: playpause, next, previous.
+
+    Chromium exposes an MPRIS player only while media is loaded, so a
+    Stopped/"no players" answer is normal when nothing is open. When no
+    player responds, a raw XF86 media key (via ydotool uinput) is injected
+    instead — the browser and most players act on it globally.
+    """
     playerctl = {"playpause": "play-pause", "next": "next", "previous": "previous"}
     if key in playerctl and shutil.which("playerctl"):
-        result = _run(["playerctl", playerctl[key]])
+        result = _run(["playerctl", "-a", playerctl[key]])
         if result.returncode == 0:
             replies = {"playpause": "Toggled playback", "next": "Skipped ahead",
                        "previous": "Went back a track"}
@@ -127,6 +146,10 @@ def media_key(key: str):
     keysyms = mapping.get(key)
     if not keysyms:
         return False, "Unknown media key"
+    from . import input_control
+
+    if input_control._ensure_daemon() and input_control._ydo("key", *keysyms):
+        return True, "Done"
     if shutil.which("xdotool"):
         _run(["xdotool", "key", *keysyms])
         return True, "Done"
@@ -277,6 +300,25 @@ def wifi(on: bool):
     if result.returncode == 0:
         return True, f"WiFi turned {'on' if on else 'off'}"
     return False, "I couldn't switch the WiFi"
+
+
+def wifi_connect(ssid: str = ""):
+    """Join a network. With a name, connect to it; without one, bounce the
+    radio so the machine rejoins its saved network."""
+    if not shutil.which("nmcli"):
+        return False, "WiFi control needs nmcli here"
+    ssid = (ssid or "").strip()
+    if ssid:
+        result = _run(["nmcli", "dev", "wifi", "connect", ssid], check=False)
+        if result.returncode == 0:
+            return True, f"Connected to {ssid}"
+        return False, f"I couldn't connect to {ssid}"
+    _run(["nmcli", "radio", "wifi", "off"])
+    time.sleep(1)
+    result = _run(["nmcli", "radio", "wifi", "on"])
+    if result.returncode == 0:
+        return True, "Reconnecting to WiFi"
+    return False, "I couldn't reconnect the WiFi"
 
 
 def bluetooth(on: bool):
