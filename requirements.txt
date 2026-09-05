@@ -11,5 +11,9 @@ PyAutoGUI>=0.9.54
 # Optional: AI chat fallback via OpenRouter (needs OPENROUTER_API_KEY)
 # (uses `requests`, already listed above — no extra package needed)
 
+# Optional: local natural-language brain — Needle 2 tool-calling model
+# (github.com/cactus-compute/needle, fully offline inference)
+cactus-needle>=2.0
+
 # Optional: window management fallback where xdotool is missing
 # pygetwindow

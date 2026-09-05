@@ -24,15 +24,26 @@ telemetry and a bottom command bar — like the reference mockup.
  you speak ──► ear.py (mic + speech recognition)
                    │ wake word "ninja"
                    ▼
-               brain.py ── routes the intent ──► skills/
-                                                  ├─ web.py          open sites / search / play songs
-                                                  ├─ apps.py         launch & quit applications
-                                                  ├─ windows.py      stash / maximise / focus / list windows
-                                                  ├─ system_ctl.py   volume · brightness · screenshots · power · status
-                                                  ├─ input_control.py type · press · click · scroll · mouse move/drag
-                                                  ├─ reminders.py      timers & reminders with voice alerts
-                                                  ├─ hypr.py         Hyprland (Wayland) compositor helpers
-                                                  └─ info.py         time · date · weather · jokes · AI chat
+               brain.py ── routes the intent
+                   │
+                   ├─ regex fast-paths ──► exact commands ("volume up")
+                   │
+                   ├─ needle_brain.py ──► Needle 2, a local 45M tool-calling
+                   │     model (offline, ~28MB RAM) that understands natural
+                   │     phrasing and calls the same skills — confidence-gated
+                   │     before anything executes
+                   │
+                   ├─ skills/
+                   │   ├─ web.py          open sites / search / play songs
+                   │   ├─ apps.py         launch & quit applications
+                   │   ├─ windows.py      stash / maximise / focus / list windows
+                   │   ├─ system_ctl.py   volume · brightness · screenshots · power · status
+                   │   ├─ input_control.py type · press · click · scroll · mouse move/drag
+                   │   ├─ reminders.py      timers & reminders with voice alerts
+                   │   ├─ hypr.py         Hyprland (Wayland) compositor helpers
+                   │   └─ info.py         time · date · weather · jokes · AI chat
+                   │
+                   └─ info.chat (OpenRouter) ── free-form questions, last resort
                    │
                    ▼
               mouth.py (text-to-speech reply)  +  NINJA HUD (gui.py)
@@ -73,6 +84,19 @@ telemetry and a bottom command bar — like the reference mockup.
 - 💻 **System control** — battery/CPU/memory reports, lock screen, sleep/suspend, log out, shutdown/restart (all destructive actions ask first)
 - ⌨️ **Input automation** — "type hello world", "press enter", "copy", "scroll down", "click", "move mouse right"
 - 🕒 **Info** — time, date, weather via wttr.in (no API key needed), jokes
+- 🧠 **Natural-language brain (Needle 2, on-device)** — you don't have to say the
+  magic words. "could you open github for me", "skip this song", "swap to
+  workspace four", "message Priya saying I'll be late" all work:
+  [Needle](https://github.com/cactus-compute/needle) is a 45M-parameter
+  tool-calling model that runs fully offline (14MB engine, ~28MB RAM) and maps
+  natural phrasing onto the skills above. Its 46 tools are split across 12 small
+  domain agents (the shape the model is trained on) with a keyword router in
+  front; every call is gated on a calibrated confidence score *before* it
+  executes, and phrases heard in the background (no wake word) need a stricter
+  score so overheard chatter can't drive the desktop. Anything below the gate —
+  or refused as off-topic — falls back to the regex brain and AI chat. Mic mute
+  and shutdown/restart/logout stay regex-only (with the spoken yes/no
+  confirmation), so the model can never reach them.
 - 🤖 **Optional AI brain** — set `OPENROUTER_API_KEY` and anything unmatched goes to your OpenRouter model (`stealth/ox-alpha` by default)
 - 🌊 **Wayland-native** — on Hyprland everything (typing, clicking, mouse moves, window control, screenshots) works through `hyprctl` and `ydotool`, not just XWayland windows
 
@@ -98,6 +122,11 @@ Optional environment variables:
 ```bash
 export OPENROUTER_API_KEY="sk-or-..."          # enables AI chat fallback
 export OPENROUTER_MODEL="stealth/ox-alpha"     # any OpenRouter model id
+export NEEDLE_ENABLED=0                        # disable the local NL brain (regex-only)
+export NEEDLE_CONFIDENCE=0.5                   # min confidence before Needle acts (0..1)
+export NEEDLE_CHATTER_CONFIDENCE=0.8           # stricter bar for background (no wake word) phrases
+export NEEDLE_WEIGHTS="my_needle.cact"         # run a fine-tuned Needle archive
+export NEEDLE_TELEMETRY=0                      # opt out of Needle's anonymous usage stats
 export ASSISTANT_NAME="Ninja"        # rename the assistant (default: Ninja)
 export WAKE_WORDS="ninja"            # custom wake words
 export WEATHER_CITY_DEFAULT="Mumbai" # default city for "what's the weather"
@@ -166,6 +195,16 @@ Say **"exit"**, **"quit"**, or **"goodbye"** to stop.
 | "ninja tell me a joke" | Programmer humour |
 
 ## Notes
+
+- The Needle brain is **additive**: exact commands still hit the instant regex
+  paths first, and anything Needle refuses or scores below the confidence gate
+  falls through to the regex brain and the optional OpenRouter chat. Setting
+  `NEEDLE_ENABLED=0` restores the pre-Needle behavior entirely.
+- Needle's calibration depends on the CPU: on this machine its own validation
+  suites pass with the production confidence gate but refuse less reliably than
+  published, which is why the gates default conservative and destructive
+  actions (shutdown/restart/logout, mic mute) are kept away from the model.
+  If Needle ever acts on background chatter, raise `NEEDLE_CHATTER_CONFIDENCE`.
 
 - Some laptops boot with the internal mic boost maxed out (+30dB), which makes the mic nothing but noise — the assistant tones it down automatically at every startup.
 - Speech recognition uses Google's free web service, so an internet connection is required for voice input; TTS works offline via eSpeak.

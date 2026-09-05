@@ -55,4 +55,23 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "stealth/ox-alpha")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# Needle (github.com/cactus-compute/needle): a 45M-parameter local
+# tool-calling model that maps natural phrases onto the skills the regex
+# brain can't match. Inference is fully offline; the 14MB engine is fetched
+# once from Hugging Face and cached under ~/.cache/cactus-needle/.
+NEEDLE_ENABLED = os.getenv("NEEDLE_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+# Minimum calibrated confidence for executing a tool call; weaker matches are
+# refused and handed back to the regex brain / AI chat. (Cactus's own
+# production contract uses 0.4; we default slightly higher because desktop
+# actions can be disruptive.) Raise it if Needle ever acts on background
+# chatter, lower it if it feels deaf.
+NEEDLE_CONFIDENCE = float(os.getenv("NEEDLE_CONFIDENCE", "0.5"))
+# Phrases heard in the background (no wake word, continuous listening) can be
+# the TV, a call, or a housemate — Needle only acts on them at this stricter
+# confidence, so overheard chatter can't drive the desktop.
+NEEDLE_CHATTER_CONFIDENCE = float(os.getenv("NEEDLE_CHATTER_CONFIDENCE", "0.8"))
+# Optional tuned .cact archive (needle finetune + build) to run instead of
+# the base model.
+NEEDLE_WEIGHTS = os.getenv("NEEDLE_WEIGHTS", "")
+
 WEATHER_CITY_DEFAULT = os.getenv("WEATHER_CITY", "")

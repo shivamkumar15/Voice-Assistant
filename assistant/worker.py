@@ -60,7 +60,6 @@ class AssistantWorker:
         self.tts_enabled = tts
         self.mic = None
 
-    # --- front-end API -------------------------------------------------------
 
     def emit(self, event):
         self.events.put(event)
@@ -70,7 +69,6 @@ class AssistantWorker:
         self.stop_event.set()
         self.commands.put(("quit", None))
 
-    # --- main loop -----------------------------------------------------------
 
     def run(self):
         try:
@@ -213,7 +211,8 @@ class AssistantWorker:
 
         self.emit(("state", "working"))
         try:
-            handled, reply = self.brain.handle_chain(text)
+            handled, reply = self.brain.handle_chain(
+                text, addressed=addressed, from_voice=from_voice)
         except Exception as exc:
             handled, reply = True, f"Something went wrong handling that: {exc}"
         # Unaddressed background chatter that isn't a command is logged to

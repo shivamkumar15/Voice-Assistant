@@ -1,16 +1,23 @@
-"""Brain: maps spoken phrases to skills and produces a spoken reply."""
+"""Brain: maps spoken phrases to skills and produces a spoken reply.
+
+Routing order: regex fast-paths (exact commands, confirmations), then the
+local Needle tool-calling model for natural phrasing the regexes can't
+match, then the OpenRouter AI chat as the final fallback.
+"""
 
 import re
 import time
 from datetime import datetime
 
 from .config import OPENROUTER_API_KEY
+from .needle_brain import NeedleBrain
 from .skills import apps, info, input_control, reminders, system_ctl, web, windows
 
 
 class Brain:
     def __init__(self):
         self.pending_confirm = None  # "shutdown" | "restart" | "logout"
+        self.needle = NeedleBrain()  # stays unavailable when disabled
 
     _CONFIRM_ACTIONS = {
         "shutdown": system_ctl.shutdown_computer,
@@ -18,8 +25,13 @@ class Brain:
         "logout": system_ctl.log_out,
     }
 
-    def handle(self, text: str) -> str:
-        """Return the spoken reply for a recognised *text* command."""
+    def handle(self, text: str, use_needle: bool = True,
+               strict: bool = False) -> str:
+        """Return the spoken reply for a recognised *text* command.
+
+        *strict* is True for phrases heard in the background without the
+        wake word — Needle then needs a higher confidence to act.
+        """
         command = text.lower().strip()
 
         if self.pending_confirm:
@@ -449,6 +461,11 @@ class Brain:
         if re.search(r"\bhow are you\b", command):
             return "Running smooth and ready. How are you?"
 
+        if use_needle:
+            handled, reply = self.needle.handle(text, strict=strict)
+            if handled:
+                return reply
+
         _, reply = info.chat(text)
         return reply
 
@@ -465,23 +482,34 @@ class Brain:
 
     _CHAIN_SEP = re.compile(r"\s*(?:;|\band then\b|\bthen\b|\band\b)\s*")
 
-    def handle_chain(self, text: str):
+    def handle_chain(self, text: str, addressed: bool = True,
+                     from_voice: bool = False):
         """Run one or more chained commands ("A and B and C").
 
         Returns (handled, reply). A split only happens when *every* part
         looks like a real command — otherwise the whole phrase is handled
-        as a single command exactly like before.
+        as a single command exactly like before. *addressed*/*from_voice*
+        come from the worker: background chatter needs a higher Needle
+        confidence before any action is taken.
         """
         text = (text or "").strip()
         if not text:
             return False, ""
+        strict = from_voice and not addressed
         if self.pending_confirm:
             return True, self.handle(text)
         parts = self._split_chain(text)
         if len(parts) == 1:
             if self._is_known_command(parts[0]):
-                return True, self.handle(parts[0])
-            return False, self.handle(parts[0])
+                return True, self.handle(parts[0], strict=strict)
+            # Unknown phrasing: Needle (the local tool-calling model) gets
+            # first shot at natural language, then the regex + AI chat
+            # fallback. use_needle is skipped in handle() to avoid double
+            # execution.
+            handled, reply = self.needle.handle(parts[0], strict=strict)
+            if handled:
+                return True, reply
+            return False, self.handle(parts[0], use_needle=False)
         replies = []
         for i, part in enumerate(parts):
             replies.append(self.handle(part))
@@ -494,6 +522,10 @@ class Brain:
         lowered = text.lower().strip()
         # Never split typed/dictated content — "and" may be literal text.
         if re.match(r"^(type|write)\s+.+$", lowered):
+            return [text]
+        # Never split questions: "what's my cpu and memory doing?" is one
+        # status request, not "what's my cpu" + "memory doing?".
+        if re.search(r"\b(what|where|when|who|why|how)\b", lowered):
             return [text]
         raw = [p.strip(" ,.!?") for p in self._CHAIN_SEP.split(text)]
         parts = [p for p in raw if p]
@@ -691,13 +723,13 @@ class Brain:
 
     @staticmethod
     def _wants_shutdown(c: str) -> bool:
-        if re.match(r"^(shut ?down|power ?off|switch off|turn off)\b", c):
+        if re.match(r"^(shut ?down|shut ?off|power ?off|power ?down|switch off|turn off)\b", c):
             # Don't hijack "turn off bluetooth" style requests.
             return not re.search(
                 r"\b(bluetooth|wi-?fi|lights?|notifications?|airplane|do not disturb)\b", c
             )
         return bool(re.search(r"\b(computer|pc|system|machine|laptop)\b", c)
-                    and re.search(r"\b(shut ?down|power ?off|turn off)\b", c))
+                    and re.search(r"\b(shut ?down|shut ?off|power ?off|power ?down|turn off)\b", c))
 
     @staticmethod
     def _wants_restart(c: str) -> bool:
