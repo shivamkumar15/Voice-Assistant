@@ -22,7 +22,10 @@ telemetry and a bottom command bar — like the reference mockup.
 
 ```
  you speak ──► ear.py (mic + speech recognition)
-                   │ wake word "ninja"
+                   │
+                   ▼
+           worker.py ── voice/text loop, wake-word + exit handling
+                   │
                    ▼
                brain.py ── routes the intent
                    │
@@ -78,10 +81,9 @@ telemetry and a bottom command bar — like the reference mockup.
   "search lofi on youtube" still gives the results page; pause/next/previous
   target every registered player, with a global media-key fallback when none
   are open
-- 📡 **WiFi joining** — "connect to wifi" bounces the radio to rejoin your saved
-  network; "connect to Starbucks WiFi" joins by name
-- 📻 **Radios & desktop bits** — "turn wifi off", "switch bluetooth on",
-  "read my clipboard", "empty the trash"
+- 📡 **WiFi & radios** — "turn wifi off", "switch bluetooth on" (via
+  `nmcli` / `bluetoothctl` / `rfkill` when available)
+- 📻 **Desktop bits** — "read my clipboard", "empty the trash"
 - 🪟 **Windows & workspaces** — "focus / minimise / maximise <app>",
   "list windows", "show desktop", "go to workspace 2", "move this window to
   workspace 3", "next workspace" (Hyprland + X11)
@@ -124,7 +126,8 @@ Linux system packages used automatically when present:
 - **Other desktops (fallbacks):** `xdotool`, `amixer`, `gnome-screenshot`/`scrot`
   - Debian/Ubuntu: `sudo apt install xdotool pulseaudio-utils scrot`
 
-Optional environment variables:
+Optional environment variables (or put them in a `.env` file in the
+project root — `assistant/config.py` loads it automatically):
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-..."          # enables AI chat fallback
@@ -133,10 +136,13 @@ export NEEDLE_ENABLED=0                        # disable the local NL brain (reg
 export NEEDLE_CONFIDENCE=0.5                   # min confidence before Needle acts (0..1)
 export NEEDLE_CHATTER_CONFIDENCE=0.8           # stricter bar for background (no wake word) phrases
 export NEEDLE_WEIGHTS="my_needle.cact"         # run a fine-tuned Needle archive
-export NEEDLE_TELEMETRY=0                      # opt out of Needle's anonymous usage stats
 export ASSISTANT_NAME="Ninja"        # rename the assistant (default: Ninja)
-export WAKE_WORDS="ninja"            # custom wake words
-export WEATHER_CITY_DEFAULT="Mumbai" # default city for "what's the weather"
+export WAKE_WORDS="ninja"            # custom wake words, comma-separated
+export WEATHER_CITY="Mumbai"         # default city for "what's the weather"
+export TTS_PIPER_VOICE_NAME="en_GB-alan-medium"  # Piper voice (see rhasspy/piper-voices)
+export TTS_PIPER_VOICE="/path/to/voice.onnx"    # ...or an explicit voice file
+export TTS_PIPER_LENGTH_SCALE="0.95"            # <1 = faster speech
+export PIPER_VOICE_DIR="~/.local/share/piper/voices"  # where voices are cached
 ```
 
 ## Run
@@ -163,7 +169,27 @@ export WEATHER_CITY_DEFAULT="Mumbai" # default city for "what's the weather"
 
 (`jarvis.py` and `alexa.py` remain as compatibility aliases for `ninja.py`.)
 
-Say **"exit"**, **"quit"**, or **"goodbye"** to stop.
+Say **"exit"**, **"quit"**, **"goodbye"**, or **"bye bye"** to stop
+(in continuous voice mode, address it — e.g. *"ninja exit"* — so stray
+chatter can't shut it down).
+
+## Project structure
+
+```
+ninja.py               entry point (HUD + voice / terminal / text modes)
+jarvis.py / alexa.py   compatibility aliases for ninja.py
+assistant/
+  ear.py               microphone capture + speech recognition
+  worker.py            voice/text loop, wake-word + exit handling
+  brain.py             regex command router + chained commands
+  needle_brain.py      local Needle 2 NL brain (12 domain agents, 46 tools)
+  mouth.py             Piper neural TTS (eSpeak fallback)
+  gui.py               N.I.N.J.A HUD window (GTK3)
+  config.py            env vars + .env loading
+  skills/              web · apps · windows · system_ctl · input_control
+                       reminders · hypr (Hyprland) · info
+honey-rs/              archived legacy Rust edition
+```
 
 ## Example commands
 
@@ -179,6 +205,8 @@ Say **"exit"**, **"quit"**, or **"goodbye"** to stop.
 | "go to 1st workspace" / "switch to workspace 2" | Jump between desktops |
 | "move this window to workspace 3" / "next workspace" | Organize windows |
 | "set a timer for 10 minutes" / "remind me to call mom in 20 minutes" | Voice + popup when due |
+| "list timers" / "cancel timers" / "cancel timer 2" | Manage running timers & reminders |
+| "open the file ~/notes/todo.txt" | Open a file with its default app |
 | "turn wifi off" / "switch bluetooth on" | Radio control |
 | "read my clipboard" / "empty the trash" | Desktop bits |
 | "ninja search google for python asyncio" | Google search results |
@@ -213,7 +241,10 @@ Say **"exit"**, **"quit"**, or **"goodbye"** to stop.
   actions (shutdown/restart/logout, mic mute) are kept away from the model.
   If Needle ever acts on background chatter, raise `NEEDLE_CHATTER_CONFIDENCE`.
 
-- Some laptops boot with the internal mic boost maxed out (+30dB), which makes the mic nothing but noise — the assistant tones it down automatically at every startup.
+- The HUD weather card defaults to Quezon City (`CITY_DEFAULT` in
+  `assistant/gui.py`); the spoken "what's the weather" reply without a city
+  uses `WEATHER_CITY` (and otherwise asks which city).
+- Some laptops boot with the internal mic boost maxed out (+30dB), which makes the mic nothing but noise — the assistant tones it down automatically at every startup (and re-checks periodically, since PipeWire can restore it mid-session). It also raises a near-muted capture source back to a usable level.
 - Speech recognition uses Google's free web service, so an internet connection is required for voice input. Replies speak through **Piper** neural TTS (a natural British voice, downloaded once on first use into `~/.local/share/piper/voices`; set `TTS_PIPER_VOICE_NAME` or `TTS_PIPER_VOICE` to choose another from rhasspy/piper-voices) and fall back to eSpeak if Piper is unavailable.
 - The HUD uses GTK3 (`python3-gi`, preinstalled on GNOME). Without it the assistant still runs voice-only in the terminal.
 - On Hyprland the assistant controls the desktop through `hyprctl` and `ydotool` (uinput), so native Wayland windows are fully supported. On other Wayland desktops some tools (xdotool/pyautogui) only affect XWayland windows, and everything degrades to a spoken "couldn't do that" instead of crashing.
