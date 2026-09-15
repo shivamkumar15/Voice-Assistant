@@ -1,5 +1,6 @@
 """Web skill: open sites in Chrome and run searches."""
 
+import os
 import re
 import shutil
 import subprocess
@@ -75,6 +76,120 @@ def _find_browser():
     return None
 
 
+def _launch_url(url: str) -> bool:
+    """Open *url* detached from the assistant, trying each browser in turn.
+
+    Previous code Popen'd a single cached browser binary with no
+    detachment. If that binary was broken (e.g. Chrome renderer SIGILL on
+    some hybrid-GPU setups) the song never played and repeated launches
+    stacked heavy renderer processes until the session froze. Trying
+    every candidate + a stdlib fallback, detached, avoids both failure
+    modes.
+    """
+    candidates: list[list[str]] = []
+    key = sys.platform
+    raw = BROWSER_CANDIDATES.get("win32" if key.startswith("win") else key, [])
+    for candidate in raw:
+        path = shutil.which(candidate)
+        if path:
+            # --new-tab reuses a running Chrome instead of spawning a
+            # whole new window/process tree for every song.
+            if "chrome" in os.path.basename(path) or "chromium" in os.path.basename(path):
+                candidates.append([path, "--new-tab", url])
+            else:
+                candidates.append([path, url])
+        elif os.path.isfile(candidate):
+            candidates.append([candidate, url])
+    # Cached single-browser path kept as a last resort before webbrowser.
+    browser = _find_browser()
+    if browser is not None:
+        candidates.append(browser + [url])
+    for cmd in candidates:
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return True
+        except OSError:
+            continue
+    try:
+        import webbrowser
+
+        webbrowser.open(url)
+        return True
+    except Exception:
+        return False
+
+
+_mpv_proc = None
+
+
+def _stop_previous_audio():
+    """Stop a previous mpv song so 'play X' never stacks audio processes.
+
+    Stacked mpvs each decode + resample + hold a PipeWire stream; on a
+    busy laptop that is how 'play a few songs' turns into 100% CPU,
+    audio underruns and an apparent full-system freeze. Tracks our own
+    mpv handle first (won't kill the user's own mpv), pkill only as a
+    fallback for mpvs orphaned by older versions.
+    """
+    global _mpv_proc
+    if _mpv_proc is not None:
+        try:
+            if _mpv_proc.poll() is None:
+                _mpv_proc.terminate()
+                try:
+                    _mpv_proc.wait(timeout=3)
+                except subprocess.SubprocessError:
+                    _mpv_proc.kill()
+        except OSError:
+            pass
+        _mpv_proc = None
+    if shutil.which("pkill"):
+        try:
+            subprocess.run(
+                ["pkill", "-f", "mpv --no-video --really-quiet"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+        except Exception:
+            pass
+
+
+def _play_audio_url(url: str) -> bool:
+    """Play *url* audio-only via mpv (lightweight). False when unavailable."""
+    global _mpv_proc
+    mpv = shutil.which("mpv")
+    if not mpv:
+        return False
+    _stop_previous_audio()
+    try:
+        _mpv_proc = subprocess.Popen(
+            [mpv, "--no-video", "--really-quiet", url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        _mpv_proc = None
+        return False
+
+
+def stop_playback() -> tuple[bool, str]:
+    """Stop the current song (for 'pause'/'stop' handling)."""
+    _stop_previous_audio()
+    from . import system_ctl
+
+    # Also pause any browser/MPRIS player so 'stop' silences everything.
+    system_ctl.media_key("playpause")
+    return True, "Stopped"
+
+
 def find_site(query: str):
     """Match a spoken phrase to a known site. Returns (name, url) or None."""
     q = query.lower().strip()
@@ -99,72 +214,60 @@ def open_website(query: str):
     if not hit:
         return False, f"I don't know the site {query}"
     name, url = hit
-    browser = _find_browser()
-    try:
-        if browser is None:
-            import webbrowser
-
-            webbrowser.open(url)
-        else:
-            subprocess.Popen(browser + [url])
+    if _launch_url(url):
         return True, f"Opening {name}"
-    except Exception as exc:
-        return False, f"Could not open {name}: {exc}"
+    return False, f"Could not open {name}"
 
 
 def google_search(query: str):
-    browser = _find_browser()
+    if not (query or "").strip():
+        return False, "What should I search for?"
     url = f"https://www.google.com/search?q={quote_plus(query)}"
-    try:
-        if browser is None:
-            import webbrowser
-
-            webbrowser.open(url)
-        else:
-            subprocess.Popen(browser + [url])
+    if _launch_url(url):
         return True, f"Searching Google for {query}"
-    except Exception as exc:
-        return False, f"Search failed: {exc}"
+    return False, "Search failed: no browser available"
 
 
 def youtube_search(query: str, autoplay: bool = True):
     """Play/search something on YouTube.
 
-    With *autoplay*, the first result's video is opened directly (the watch
-    page starts playing on its own) instead of dropping the user on the
-    search results — "play X" should mean play, not browse.
+    With *autoplay*, the first result's video is played audio-only via mpv
+    (lightweight: ~50MB, no GPU, no renderer to crash the session) instead
+    of opening a full Chrome window per song. The browser is only a
+    fallback when mpv is missing/fails, or when autoplay=False (the user
+    asked to *search*, not play).
     """
-    url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
-    playing = False
+    query = (query or "").strip()
+    if not query:
+        return False, "What should I play?"
+    search_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+    watch_url = ""
     if autoplay:
         try:
             page = requests.get(
-                url,
+                search_url,
                 headers={
                     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
                     "Accept-Language": "en-US,en;q=0.9",
                 },
                 timeout=8,
             )
+            page.raise_for_status()
             first = re.search(r'"videoId":"([\w-]{11})"', page.text)
             if first:
-                url = f"https://www.youtube.com/watch?v={first.group(1)}"
-                playing = True
+                watch_url = f"https://www.youtube.com/watch?v={first.group(1)}"
         except requests.RequestException:
-            pass  # no network / parse fail — fall back to the results page
-    browser = _find_browser()
-    try:
-        if browser is None:
-            import webbrowser
-
-            webbrowser.open(url)
-        else:
-            subprocess.Popen(browser + [url])
-        if playing:
+            pass  # no network / parse fail — fall back below
+        if watch_url and _play_audio_url(watch_url):
             return True, f"Playing {query} on YouTube"
+        # mpv missing or failed: fall back to the browser so *something*
+        # still plays instead of silence.
+        if _launch_url(watch_url or search_url):
+            return True, f"Playing {query} on YouTube"
+        return False, "YouTube failed: no player or browser available"
+    if _launch_url(search_url):
         return True, f"Searching YouTube for {query}"
-    except Exception as exc:
-        return False, f"YouTube failed: {exc}"
+    return False, "YouTube failed: no browser available"
 
 
 # Generic "play music" style requests — the user wants *music*, not a video
@@ -209,16 +312,8 @@ def whatsapp_send(person: str, message: str):
     digits = re.sub(r"[^\d]", "", person)
     if digits and len(digits) >= 7 and len(re.sub(r"[\d+ ]", "", person)) == 0:
         url = f"https://wa.me/{digits}?text={quote_plus(message)}"
-        browser = _find_browser()
-        try:
-            if browser is None:
-                import webbrowser
-
-                webbrowser.open(url)
-            else:
-                subprocess.Popen(browser + [url])
-        except Exception as exc:
-            return False, f"Could not open WhatsApp: {exc}"
+        if not _launch_url(url):
+            return False, "Could not open WhatsApp"
         time.sleep(6)  # let the chat load
         input_control.press_key("enter")  # send the prefilled message
         return True, f"Sent to {person} on WhatsApp"

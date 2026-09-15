@@ -8,8 +8,24 @@ import subprocess
 import time
 
 
-def _run(cmd, check=False):
-    return subprocess.run(cmd, capture_output=True, text=True, check=check)
+def _run(cmd, check=False, timeout=5):
+    """Run *cmd* with a timeout so a hung PipeWire/playerctl can never
+    freeze the assistant worker (which the user reads as 'laptop crashed').
+
+    Previously every pactl/playerctl/brightnessctl call blocked forever;
+    with PipeWire in a bad state (e.g. 'No such device' spam) the whole
+    HUD + voice loop wedged.
+    """
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, check=check, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Return a failed result instead of raising: callers already
+        # handle returncode != 0 as 'unsupported / try fallback'.
+        return subprocess.CompletedProcess(
+            cmd, returncode=1, stdout="", stderr=f"timeout: {exc}"
+        )
 
 
 def _spawn(cmd):

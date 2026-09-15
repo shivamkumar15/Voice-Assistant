@@ -136,6 +136,7 @@ def _speak_piper(text: str) -> bool:
     voice = _resolve_piper_voice()
     if not voice:
         return False
+    wav_path: str | None = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav:
             wav_path = wav.name
@@ -144,21 +145,30 @@ def _speak_piper(text: str) -> bool:
             cmd += ["--volume", str(TTS_VOLUME)]
         if TTS_PIPER_LENGTH_SCALE:
             cmd += ["-l", TTS_PIPER_LENGTH_SCALE]
-        result = subprocess.run(cmd, input=text.encode(), timeout=60,
+        # 20s is plenty for a short reply; 60s let a wedged piper wedge
+        # the whole assistant (held _lock) and look like a full freeze.
+        result = subprocess.run(cmd, input=text.encode(), timeout=20,
                                 capture_output=True)
-        if result.returncode != 0 or not os.path.getsize(wav_path):
+        if result.returncode != 0 or not os.path.exists(wav_path):
+            return False
+        try:
+            if not os.path.getsize(wav_path):
+                return False
+        except OSError:
             return False
         play = [player]
         if os.path.basename(player) == "ffplay":
             play += ["-nodisp", "-autoexit", "-loglevel", "quiet"]
-        subprocess.run(play + [wav_path], timeout=120,
+        # TTS wavs are seconds long; 30s cap means a hung paplay/PipeWire
+        # fails fast instead of freezing speech (and the worker) for 2 min.
+        subprocess.run(play + [wav_path], timeout=30,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except (OSError, subprocess.SubprocessError):
         return False
     finally:
         try:
-            if os.path.exists(wav_path):
+            if wav_path and os.path.exists(wav_path):
                 os.unlink(wav_path)
         except OSError:
             pass
@@ -173,9 +183,26 @@ def speak(text: str) -> None:
         with _lock:
             if _speak_piper(text):
                 return
+            # eSpeak fallback: never let a hung audio backend wedge the
+            # worker. runAndWait has no timeout, so bound it.
+            import concurrent.futures
+
             engine = _get_engine()
             engine.say(text)
-            engine.runAndWait()
+
+            def _wait():
+                engine.runAndWait()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(_wait)
+                try:
+                    fut.result(timeout=15)
+                except concurrent.futures.TimeoutError:
+                    try:
+                        engine.stop()
+                    except Exception:
+                        pass
+                    print("[tts] eSpeak playback timed out — skipping audio")
     except Exception as exc:  # never let audio failure kill the loop
         print(f"[tts error: {exc}]")
 
