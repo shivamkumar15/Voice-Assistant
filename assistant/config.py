@@ -56,10 +56,16 @@ PIPER_VOICE_DIR = Path(os.getenv(
     "PIPER_VOICE_DIR", str(Path.home() / ".local" / "share" / "piper" / "voices")
 ))
 
-MIC_DEVICE_INDEX = None        
-PHRASE_TIME_LIMIT = 8           
-LISTEN_TIMEOUT = 6               
-FOLLOWUP_TIMEOUT = 12            
+MIC_DEVICE_INDEX = None
+PHRASE_TIME_LIMIT = 8
+LISTEN_TIMEOUT = 6
+FOLLOWUP_TIMEOUT = 12
+
+# Speech-to-text language for Google recognition (e.g. "en-US", "en-IN",
+# "en-PH"). If the assistant constantly mishears accented words, set this
+# to your English variant — it makes a big difference for words like
+# "workspace".
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en-US")
 
 
 BROWSER_CANDIDATES = {

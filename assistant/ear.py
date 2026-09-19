@@ -20,7 +20,45 @@ import sys
 import threading
 import time
 
-from .config import MIC_DEVICE_INDEX, PHRASE_TIME_LIMIT
+from .config import MIC_DEVICE_INDEX, PHRASE_TIME_LIMIT, STT_LANGUAGE
+
+# Words the assistant can act on. When Google returns several guesses for
+# one utterance, the guess containing one of these wins over the top
+# hypothesis — e.g. "go to box 2" loses to "go to workspace 2", so a
+# mangled keyword doesn't eat the whole command.
+_COMMAND_KEYWORDS = (
+    "workspace", "volume", "brightness", "screenshot", "youtube", "whatsapp",
+    "telegram", "terminal", "vscode", "chrome", "firefox", "timer", "reminder",
+    "bluetooth", "wifi", "clipboard", "trash", "mouse", "click", "scroll",
+    "type", "press", "open", "close", "focus", "minimise", "minimize",
+    "maximise", "maximize", "play", "pause", "weather", "joke", "lock",
+    "sleep", "shutdown", "restart",
+)
+
+
+def _pick_transcript(result) -> str:
+    """Pick the best guess from a show_all recognition result.
+
+    Prefers an alternative containing a known command keyword; otherwise
+    the top hypothesis. Returns '' when nothing usable came back.
+    """
+    if isinstance(result, str):
+        return result.strip()
+    if not isinstance(result, dict):
+        return ""
+    alternatives = result.get("alternative") or []
+    if not alternatives:
+        return ""
+    texts = [str(a.get("transcript") or "").strip()
+             for a in alternatives if isinstance(a, dict)]
+    texts = [t for t in texts if t]
+    if not texts:
+        return ""
+    for text in texts:
+        lowered = text.lower()
+        if any(k in lowered for k in _COMMAND_KEYWORDS):
+            return text
+    return texts[0]
 
 
 @contextlib.contextmanager
@@ -153,6 +191,9 @@ class Ear:
         seconds_per_chunk = chunk / rate
         # Recent noise-floor history (~8 s). Median, so bursts don't count.
         history = collections.deque(maxlen=max(60, int(8 / seconds_per_chunk)))
+        # Pre-roll: keep the last ~0.4 s of audio so the first syllable
+        # ("work-" in "workspace") isn't clipped when the gate triggers late.
+        preroll = collections.deque(maxlen=max(1, int(0.4 / seconds_per_chunk)))
         quiet_chunks_needed = max(1, int(0.6 / seconds_per_chunk))
         min_speech_chunks = max(1, int(0.3 / seconds_per_chunk))
         min_gate = 700  # never react to anything quieter than this
@@ -175,12 +216,14 @@ class Ear:
             level = audioop.rms(data, width)
             self._push_audio_level(level)
             history.append(level)
+            preroll.append(data)
             gate = max(statistics.median(history) * 2.5, min_gate)
             if level < gate:
                 continue
 
             # Speech started — record until ~0.6 s of quiet or the phrase cap.
-            frames = [data]
+            # Prepend the pre-roll so clipped first syllables survive.
+            frames = list(preroll) + [data]
             quiet_run = 0
             deadline = time.monotonic() + PHRASE_TIME_LIMIT
             while time.monotonic() < deadline:
@@ -203,7 +246,11 @@ class Ear:
 
             audio = sr.AudioData(b"".join(frames), rate, width)
             try:
-                text = recognizer.recognize_google(audio)
+                # show_all=True returns every guess; _pick_transcript keeps
+                # the one that looks most like a real command.
+                result = recognizer.recognize_google(
+                    audio, language=STT_LANGUAGE, show_all=True)
+                text = _pick_transcript(result)
             except sr.UnknownValueError:
                 continue
             except sr.RequestError as exc:

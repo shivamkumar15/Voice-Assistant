@@ -112,6 +112,11 @@ class Brain:
         wake word — Needle then needs a higher confidence to act.
         """
         command = text.lower().strip()
+        # Speech-recognition repairs: Google often splits "workspace" into
+        # "work space" and clips it to "box"/"works" — normalise before
+        # routing so the command still lands.
+        command = re.sub(r"\bwork\s+space\b", "workspace", command)
+        command = re.sub(r"\bworks\s+box\b", "workspace", command)
 
         # --- Background jobs (management + "X in background") -------------
         # Skip when this call already IS the background execution.
@@ -173,9 +178,11 @@ class Brain:
             return reply
 
         # --- Workspaces (must precede the generic open/go-to handler) ---
+        # "box" is accepted as "workspace": a clipped "workspace" is what
+        # Google STT most often returns ("go to box 2").
         m = re.match(r"^((?:go to|switch to|move to|jump to|open))\s+(?:the\s+|my\s+)?(.+)$", command)
-        if m and "workspace" in command:
-            rest = re.sub(r"\bworkspaces?\b", "", m.group(2)).strip()
+        if m and ("workspace" in command or re.search(r"\bbox\b", command)):
+            rest = re.sub(r"\bworkspaces?\b|\bbox\b", "", m.group(2)).strip()
             if re.fullmatch(r"(next|previous|prev)", rest):
                 _, reply = windows.cycle_workspace("next" if rest == "next" else "prev")
                 return reply
@@ -187,7 +194,7 @@ class Brain:
                 return "Which workspace? Say: go to workspace 2"
             # else: not really a workspace command — fall through to open/etc.
         m = re.match(
-            r"^(?:move|send)\s+(?:(.+?)\s+)?to\s+(?:the\s+|my\s+)?workspaces?\s+(.+)$",
+            r"^(?:move|send)\s+(?:(.+?)\s+)?to\s+(?:the\s+|my\s+)?(?:workspaces?|box)\s+(.+)$",
             command,
         )
         if m:
@@ -203,7 +210,7 @@ class Brain:
         if m:
             _, reply = windows.cycle_workspace("next" if m.group(1) == "next" else "prev")
             return reply
-        m = re.match(r"^(?:the\s+|my\s+)?workspaces?\s+(.+)$", command)
+        m = re.match(r"^(?:the\s+|my\s+)?(?:workspaces?|box)\s+(.+)$", command)
         if m:
             n = windows.parse_workspace_number(m.group(1))
             if n is not None:
@@ -683,6 +690,9 @@ class Brain:
         silence background chatter in continuous-listening mode.
         """
         c = text.lower().strip()
+        # Same STT repairs as handle(): "work space" -> "workspace".
+        c = re.sub(r"\bwork\s+space\b", "workspace", c)
+        c = re.sub(r"\bworks\s+box\b", "workspace", c)
         if not c:
             return False
         if self.pending_confirm:
@@ -814,21 +824,21 @@ class Brain:
             return True
         if re.search(r"\buptime\b|^how long .* been (on|running|up)", c):
             return True
-        # Workspaces (mirrors the handlers above).
+        # Workspaces (mirrors the handlers above; "box" = clipped "workspace").
         m = re.match(r"^((?:go to|switch to|move to|jump to|open))\s+(?:the\s+|my\s+)?(.+)$", c)
-        if m and "workspace" in c:
-            rest = re.sub(r"\bworkspaces?\b", "", m.group(2)).strip()
+        if m and ("workspace" in c or re.search(r"\bbox\b", c)):
+            rest = re.sub(r"\bworkspaces?\b|\bbox\b", "", m.group(2)).strip()
             if re.fullmatch(r"(next|previous|prev)", rest):
                 return True
             if windows.parse_workspace_number(rest) is not None:
                 return True
             if m.group(1) != "open":
                 return True  # handled as a "which workspace?" prompt
-        if re.match(r"^(?:move|send)\s+(?:(.+?)\s+)?to\s+(?:the\s+|my\s+)?workspaces?\s+.+$", c):
+        if re.match(r"^(?:move|send)\s+(?:(.+?)\s+)?to\s+(?:the\s+|my\s+)?(?:workspaces?|box)\s+.+$", c):
             return True
         if re.match(r"^(next|previous|prev)\s+(?:the\s+)?workspaces?$", c):
             return True
-        m = re.match(r"^(?:the\s+|my\s+)?workspaces?\s+(.+)$", c)
+        m = re.match(r"^(?:the\s+|my\s+)?(?:workspaces?|box)\s+(.+)$", c)
         if m and windows.parse_workspace_number(m.group(1)) is not None:
             return True
         if re.match(r"^(?:set )?(?:a |an )?timer for .+$", c):
