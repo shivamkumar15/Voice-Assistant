@@ -5,15 +5,25 @@ from pathlib import Path
 
 
 def _load_dotenv():
-    """Load key=value pairs from a .env file next to the project (no deps)."""
-    env_file = Path(__file__).resolve().parent.parent / ".env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            os.environ.setdefault(key.strip(), value.strip().strip("'").strip('"'))
+    """Load key=value pairs from .env files (no deps).
+
+    Checks the project root first, then assistant/.env (legacy location) —
+    existing installs keep working either way. Real environment variables
+    always win (setdefault).
+    """
+    here = Path(__file__).resolve()
+    for env_file in (here.parent.parent / ".env", here.parent / ".env"):
+        if not env_file.exists():
+            continue
+        try:
+            text = env_file.read_text()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip().strip("'").strip('"'))
 
 
 _load_dotenv()
@@ -65,8 +75,37 @@ BROWSER_CANDIDATES = {
 }
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "stealth/ox-alpha")
+# Muse Spark 1.3 — Meta's agentic reasoning model (1M context, tool
+# calling). Served on OpenRouter as meta/muse-spark-1.3 and on
+# OpenCode-compatible gateways behind the same chat-completions API, so
+# OPENROUTER_BASE_URL can point at either. Overrides via OPENROUTER_MODEL.
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta/muse-spark-1.3")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# --- Muse Spark 1.3 tuning -------------------------------------------------
+# Reasoning effort for Spark ("minimal"/"low"/"medium"/"high"/"max" or "");
+# "minimal" is the default because Spark spends the token budget on
+# reasoning first — with the default effort even a 150-token budget comes
+# back empty (all reasoning, no answer). Higher = smarter but slower and
+# hungrier; raise it together with SPARK_MAX_TOKENS when you have credits.
+SPARK_REASONING_EFFORT = os.getenv("SPARK_REASONING_EFFORT", "minimal")
+SPARK_TEMPERATURE = float(os.getenv("SPARK_TEMPERATURE", "0.4"))
+# Completion budget. 200 fits small/free OpenRouter balances and still
+# answers (old fallback used 120 and often cut off). Raise to 400+ with
+# credits for richer answers; the client auto-retries smaller when the
+# balance can't cover the request.
+SPARK_MAX_TOKENS = int(os.getenv("SPARK_MAX_TOKENS", "200"))
+# Conversation turns remembered (user+assistant pairs) for follow-ups.
+SPARK_HISTORY = int(os.getenv("SPARK_HISTORY", "12"))
+# When 0, Spark answers chat-only (no tool calls); when 1 (default) it can
+# act via tools (open apps, timers, volume, ...).
+SPARK_TOOLS_ENABLED = os.getenv("SPARK_TOOLS_ENABLED", "1").lower() not in (
+    "0", "false", "no", "off",
+)
+
+# --- Background execution --------------------------------------------------
+BACKGROUND_MAX_WORKERS = int(os.getenv("BACKGROUND_MAX_WORKERS", "4"))
+BACKGROUND_SHELL_TIMEOUT = int(os.getenv("BACKGROUND_SHELL_TIMEOUT", "120"))
 
 # Needle (github.com/cactus-compute/needle): a 45M-parameter local
 # tool-calling model that maps natural phrases onto the skills the regex

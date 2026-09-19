@@ -52,6 +52,11 @@ class AssistantWorker:
         self.commands = queue.Queue()
         self.stop_event = threading.Event()
         self.brain = Brain()
+        # Background jobs report back here: HUD message + spoken reply.
+        try:
+            self.brain.set_job_listener(self._on_job_done)
+        except Exception:
+            pass
         # Continuous listening is the default: every heard phrase is treated
         # as a command. Pass no_wake=False for strict wake-word-only mode.
         self.no_wake = no_wake
@@ -227,6 +232,20 @@ class AssistantWorker:
         self.emit(("state", self._idle_state()))
 
     # --- helpers -------------------------------------------------------------
+
+    def _on_job_done(self, job_id: int, label: str, ok: bool, reply: str):
+        """Background thread callback: show + speak job completion."""
+        status = "finished" if ok else "failed"
+        text = f"Job #{job_id} {status} ({label}): {reply}"
+        try:
+            self.emit(("assistant", text))
+            self.emit(("state", "speaking"))
+            self._speak(text)
+        finally:
+            try:
+                self.emit(("state", self._idle_state()))
+            except Exception:
+                pass
 
     def _speak(self, text: str):
         if not text:

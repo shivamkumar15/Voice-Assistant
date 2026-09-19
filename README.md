@@ -46,7 +46,9 @@ telemetry and a bottom command bar — like the reference mockup.
                    │   ├─ hypr.py         Hyprland (Wayland) compositor helpers
                    │   └─ info.py         time · date · weather · jokes · AI chat
                    │
-                   └─ info.chat (OpenRouter) ── free-form questions, last resort
+                    └─ info.chat (Muse Spark 1.3) ── agentic fallback: history,
+                       tool calls (acts, doesn't just talk), speech-cleaned
+                       replies; auto-retries smaller budgets on low credits
                    │
                    ▼
               mouth.py (text-to-speech reply)  +  NINJA HUD (gui.py)
@@ -106,7 +108,22 @@ telemetry and a bottom command bar — like the reference mockup.
   or refused as off-topic — falls back to the regex brain and AI chat. Mic mute
   and shutdown/restart/logout stay regex-only (with the spoken yes/no
   confirmation), so the model can never reach them.
-- 🤖 **Optional AI brain** — set `OPENROUTER_API_KEY` and anything unmatched goes to your OpenRouter model (`stealth/ox-alpha` by default)
+- 🤖 **Muse Spark 1.3 brain (agentic)** — set `OPENROUTER_API_KEY` and anything
+  unmatched goes to `meta/muse-spark-1.3` (1M context, reasoning + tool calls).
+  Unlike a plain chatbot it keeps conversation history (follow-ups work:
+  *"what did I just ask you?"*), can *act* via 16 tools (open apps, play
+  music, volume, timers, screenshots, …) over multiple steps, and replies are
+  cleaned for speech (no markdown read aloud). Same API shape as
+  OpenCode-compatible gateways, so `OPENROUTER_BASE_URL` can point at either.
+  It auto-retries smaller token budgets on low-credit accounts and tells you
+  plainly when credits run out. `spark status` shows model/tools/history;
+  `clear chat history` resets it.
+- 🏃 **Background commands** — append *"in background"* / *"in parallel"* to any
+  command and it runs on a thread pool without blocking voice or the HUD:
+  *"check weather in background"*, *"run ls -la in background"* (raw shell
+  works too: `run <shell command> in background`). Manage with *"list jobs"*,
+  *"check job 1"*, *"cancel job 2"*, *"clear jobs"* — completion is spoken and
+  shown in the HUD.
 - 🌊 **Wayland-native** — on Hyprland everything (typing, clicking, mouse moves, window control, screenshots) works through `hyprctl` and `ydotool`, not just XWayland windows
 
 ## Setup
@@ -130,8 +147,15 @@ Optional environment variables (or put them in a `.env` file in the
 project root — `assistant/config.py` loads it automatically):
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-..."          # enables AI chat fallback
-export OPENROUTER_MODEL="stealth/ox-alpha"     # any OpenRouter model id
+export OPENROUTER_API_KEY="sk-or-..."          # enables the Muse Spark 1.3 brain
+export OPENROUTER_MODEL="meta/muse-spark-1.3"  # default; any OpenRouter model id
+export SPARK_REASONING_EFFORT="minimal"        # minimal/low/medium/high/max (default: minimal)
+export SPARK_MAX_TOKENS="200"                  # completion budget (auto-retries smaller)
+export SPARK_TEMPERATURE="0.4"                 # answer randomness
+export SPARK_HISTORY="12"                      # conversation turns remembered
+export SPARK_TOOLS_ENABLED="1"                 # 0 = chat-only, 1 = Spark can act via tools
+export BACKGROUND_MAX_WORKERS="4"              # background job threads
+export BACKGROUND_SHELL_TIMEOUT="120"          # seconds per background shell command
 export NEEDLE_ENABLED=0                        # disable the local NL brain (regex-only)
 export NEEDLE_CONFIDENCE=0.5                   # min confidence before Needle acts (0..1)
 export NEEDLE_CHATTER_CONFIDENCE=0.8           # stricter bar for background (no wake word) phrases
@@ -226,6 +250,9 @@ honey-rs/              archived legacy Rust edition
 | "ninja where's the mouse" | Speaks cursor coordinates |
 | "ninja what's the weather in delhi" | Live wttr.in report |
 | "ninja system status" | CPU / memory / disk / battery |
+| "check weather in background" / "run ls -la in background" | Runs without blocking; reports when done |
+| "list jobs" / "check job 1" / "cancel job 2" | Manage background jobs |
+| "spark status" / "clear chat history" | Muse Spark model, tools & memory diagnostics |
 | "ninja lock screen" / "sleep" / "log out" / "shutdown the computer" | Session control (confirm) |
 | "ninja tell me a joke" | Programmer humour |
 
@@ -233,8 +260,8 @@ honey-rs/              archived legacy Rust edition
 
 - The Needle brain is **additive**: exact commands still hit the instant regex
   paths first, and anything Needle refuses or scores below the confidence gate
-  falls through to the regex brain and the optional OpenRouter chat. Setting
-  `NEEDLE_ENABLED=0` restores the pre-Needle behavior entirely.
+  falls through to the regex brain and the Muse Spark 1.3 agent. Setting
+  `NEEDLE_ENABLED=0` restores the pre-Needle behavior entirely (regex → Spark).
 - Needle's calibration depends on the CPU: on this machine its own validation
   suites pass with the production confidence gate but refuse less reliably than
   published, which is why the gates default conservative and destructive

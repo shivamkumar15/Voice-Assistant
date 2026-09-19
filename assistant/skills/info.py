@@ -8,8 +8,6 @@ import requests
 from ..config import (
     ASSISTANT_NAME,
     OPENROUTER_API_KEY,
-    OPENROUTER_BASE_URL,
-    OPENROUTER_MODEL,
     WEATHER_CITY_DEFAULT,
 )
 
@@ -67,48 +65,37 @@ def who_are_you():
 
 
 def chat(prompt: str):
-    """OpenRouter fallback for anything that isn't a known command (optional)."""
+    """Muse Spark 1.3 fallback for anything that isn't a known command.
+
+    Uses the agentic Spark client (history + tools + speech-cleaned output);
+    falls back to the legacy single-shot call when tools are disabled.
+    """
     if not OPENROUTER_API_KEY:
         return False, (
             "That's not a command I know yet. Try: open youtube, play song , "
             "volume up,"
         )
     try:
-        response = requests.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": OPENROUTER_MODEL,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            f"You are {ASSISTANT_NAME}, a concise desktop voice "
-                            "assistant. Answer in one or two short spoken-style "
-                            "sentences. No markdown."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": 120,
-            },
-            timeout=20,
-        )
-        data = response.json()
-        if response.ok:
-            text = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
-            if text:
-                return True, text
-            return False, "I have nothing to say about that."
-        message = data.get("error", {}).get("message") or f"HTTP {response.status_code}"
-        return False, f"The AI service said: {message}"
-    except requests.RequestException as exc:
-        return False, f"My AI brain is unreachable right now. ({exc})"
+        from ..spark import get_spark, legacy_chat
+
+        spark = get_spark()
+        ok, reply = spark.ask(prompt)
+        if ok:
+            return True, reply
+        # spark.ask returns (False, '') on refusal — try legacy once so
+        # plain questions still get answered even when tools refuse.
+        if not reply:
+            return legacy_chat(prompt)
+        return False, reply
+    except Exception as exc:
+        return False, f"My AI brain hit a snag. ({exc})"
+
+
+def spark_status():
+    """Short diagnostics line for 'ai status' / 'spark status' commands."""
+    try:
+        from ..spark import get_spark
+
+        return True, get_spark().status()
+    except Exception as exc:
+        return False, f"Spark status unavailable: {exc}"

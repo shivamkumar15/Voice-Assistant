@@ -1,14 +1,16 @@
 """Brain: maps spoken phrases to skills and produces a spoken reply.
 
-Routing order: regex fast-paths (exact commands, confirmations), then the
-local Needle tool-calling model for natural phrasing the regexes can't
-match, then the OpenRouter AI chat as the final fallback.
+Routing order: regex fast-paths (exact commands, confirmations,
+background jobs), then the local Needle tool-calling model for natural
+phrasing the regexes can't match, then Muse Spark 1.3 (agentic, with
+tools + history) as the final fallback.
 """
 
 import re
 import time
 from datetime import datetime
 
+from . import background
 from .config import OPENROUTER_API_KEY
 from .needle_brain import NeedleBrain
 from .skills import apps, info, input_control, reminders, system_ctl, web, windows
@@ -18,6 +20,83 @@ class Brain:
     def __init__(self):
         self.pending_confirm = None  # "shutdown" | "restart" | "logout"
         self.needle = NeedleBrain()  # stays unavailable when disabled
+        self._job_listener = None
+        # Background completions funnel through here, then out to the
+        # worker (HUD + voice) when one is attached.
+        background.set_listener(self._on_job_done)
+
+    def set_job_listener(self, fn):
+        """Worker attaches here to speak/show background completions."""
+        self._job_listener = fn
+
+    def _on_job_done(self, job_id: int, label: str, ok: bool, reply: str):
+        listener = self._job_listener
+        if listener is not None:
+            try:
+                listener(job_id, label, ok, reply)
+            except Exception:
+                pass
+        else:
+            # No worker (terminal text mode): at least print it.
+            status = "finished" if ok else "failed"
+            print(f"[job #{job_id} {status}] {label}: {reply}")
+
+    def _run_foreground(self, command: str):
+        """Run a background-dispatched command; returns (ok, reply)."""
+        try:
+            reply = self.handle(command, _from_background=True)
+            return True, reply
+        except Exception as exc:
+            return False, f"Background task failed: {exc}"
+
+    def _dispatch_background(self, command: str) -> str:
+        command = (command or "").strip()
+        if not command:
+            return "What should I run in the background?"
+        # Raw shell ("run ls -la in background") executes the shell string.
+        label = command
+        if background.looks_like_shell(command):
+            label = re.sub(r"^run\s+", "", command, flags=re.IGNORECASE).strip()
+            job_id = background.submit(label, background.run_shell, label)
+        elif re.match(r"^run\s+.+", command, re.IGNORECASE):
+            # "run <assistant command> in background" — try it as a skill
+            # first; run_shell is the fallback only when it looks like shell.
+            label = re.sub(r"^run\s+", "", command, flags=re.IGNORECASE).strip()
+            job_id = background.submit(label or command, self._run_foreground,
+                                       label or command)
+        else:
+            job_id = background.submit(command, self._run_foreground, command)
+        return (
+            f"Running '{label}' in background as job #{job_id}. "
+            f"Say 'check job {job_id}' for the result."
+        )
+
+    def _handle_job_commands(self, command: str):
+        """Background job management; returns reply or None when no match."""
+        c = command.strip()
+        if re.fullmatch(r"(list|show)( my)? (background )?jobs?", c):
+            _, reply = background.list_jobs()
+            return reply
+        if re.fullmatch(r"(clear|clean|delete)( finished| completed| done)? jobs?", c):
+            _, reply = background.clear_finished()
+            return reply
+        m = re.fullmatch(
+            r"(check|get|show)( the| my)? (status of |result of )?job(?: #?(\d+))?", c)
+        if m:
+            num = int(m.group(2)) if m.group(2) else background.parse_job_number(c)
+            if num is None:
+                _, reply = background.list_jobs()
+                return reply
+            _, reply = background.job_status(num)
+            return reply
+        m = re.fullmatch(r"(cancel|stop|kill)( the| my)? job(?: #?(\d+))?", c)
+        if m:
+            num = int(m.group(2)) if m.group(2) else background.parse_job_number(c)
+            if num is None:
+                return "Which job? Say: cancel job 1"
+            _, reply = background.cancel_job(num)
+            return reply
+        return None
 
     _CONFIRM_ACTIONS = {
         "shutdown": system_ctl.shutdown_computer,
@@ -26,13 +105,40 @@ class Brain:
     }
 
     def handle(self, text: str, use_needle: bool = True,
-               strict: bool = False) -> str:
+               strict: bool = False, _from_background: bool = False) -> str:
         """Return the spoken reply for a recognised *text* command.
 
         *strict* is True for phrases heard in the background without the
         wake word — Needle then needs a higher confidence to act.
         """
         command = text.lower().strip()
+
+        # --- Background jobs (management + "X in background") -------------
+        # Skip when this call already IS the background execution.
+        if not _from_background:
+            job_reply = self._handle_job_commands(command)
+            if job_reply is not None:
+                return job_reply
+            clean, want_bg = background.strip_background_marker(text)
+            if want_bg and clean.strip():
+                return self._dispatch_background(clean)
+
+        # --- Spark / AI diagnostics ---------------------------------------
+        if re.fullmatch(
+            r"(spark|ai)( brain)? status|(what|which) (ai|model)( are you using)?", command
+        ) or command in ("ai status", "spark status", "model status"):
+            _, reply = info.spark_status()
+            return reply
+        if re.fullmatch(
+            r"(clear|reset|forget)( the| my)? (chat|ai|conversation)( history)?", command
+        ):
+            try:
+                from .spark import get_spark
+
+                get_spark().reset()
+            except Exception:
+                pass
+            return "Conversation history cleared."
 
         if self.pending_confirm:
             action = self.pending_confirm
@@ -516,8 +622,16 @@ class Brain:
         strict = from_voice and not addressed
         if self.pending_confirm:
             return True, self.handle(text)
+        # Whole chain asked in background: "A and B in background".
+        clean_all, want_bg_all = background.strip_background_marker(text)
+        if want_bg_all and clean_all:
+            return True, self._dispatch_background(clean_all)
         parts = self._split_chain(text)
         if len(parts) == 1:
+            # Single "X in background" also returns immediately.
+            clean, want_bg = background.strip_background_marker(parts[0])
+            if want_bg and clean.strip():
+                return True, self._dispatch_background(clean)
             if self._is_known_command(parts[0]):
                 return True, self.handle(parts[0], strict=strict)
             # Unknown phrasing: Needle (the local tool-calling model) gets
@@ -572,6 +686,23 @@ class Brain:
         if not c:
             return False
         if self.pending_confirm:
+            return True
+        # Background + job control are always commands.
+        try:
+            clean, want_bg = background.strip_background_marker(text)
+            if want_bg and clean.strip():
+                return True
+            if self._handle_job_commands(c) is not None:
+                return True
+        except Exception:
+            pass
+        if re.fullmatch(
+            r"(spark|ai)( brain)? status|(what|which) (ai|model)( are you using)?", c
+        ) or c in ("ai status", "spark status", "model status"):
+            return True
+        if re.fullmatch(r"(clear|reset|forget)( the| my)? (chat|ai|conversation)( history)?", c):
+            return True
+        if re.match(r"^run\s+.+", c):
             return True
         if OPENROUTER_API_KEY:
             return True  # AI fallback answers everything
