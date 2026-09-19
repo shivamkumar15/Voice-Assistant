@@ -108,16 +108,21 @@ telemetry and a bottom command bar — like the reference mockup.
   or refused as off-topic — falls back to the regex brain and AI chat. Mic mute
   and shutdown/restart/logout stay regex-only (with the spoken yes/no
   confirmation), so the model can never reach them.
-- 🤖 **Muse Spark 1.3 brain (agentic)** — set `OPENROUTER_API_KEY` and anything
-  unmatched goes to `meta/muse-spark-1.3` (1M context, reasoning + tool calls).
-  Unlike a plain chatbot it keeps conversation history (follow-ups work:
-  *"what did I just ask you?"*), can *act* via 16 tools (open apps, play
-  music, volume, timers, screenshots, …) over multiple steps, and replies are
-  cleaned for speech (no markdown read aloud). Same API shape as
-  OpenCode-compatible gateways, so `OPENROUTER_BASE_URL` can point at either.
+- 🤖 **Muse Spark 1.3 brain (free via OpenCode)** — anything unmatched goes to
+  `muse-spark-1.3-contributor-free` through your local `opencode` CLI — no API
+  key needed, just OpenCode installed + logged in (the free Contributor tier
+  only answers when called from within OpenCode, so Ninja shells out to
+  `opencode run --pure` in a scratch dir and answers directly without tools).
+  Keeps conversation history (follow-ups work: *"what did I just ask you?"*),
+  replies are cleaned for speech (no markdown read aloud), and `SPARK_PROVIDER`
+  selects backends: `auto` (default — free CLI, OpenRouter fallback),
+  `opencode`, or `openrouter` (`meta/muse-spark-1.3`, needs `OPENROUTER_API_KEY`,
+  acts via 16 tools). Same OpenRouter API shape as OpenCode-compatible
+  gateways, so `OPENROUTER_BASE_URL` can point at either.
   It auto-retries smaller token budgets on low-credit accounts and tells you
-  plainly when credits run out. `spark status` shows model/tools/history;
-  `clear chat history` resets it.
+  plainly when credits run out. `spark status` shows backend/model/history;
+  `clear chat history` resets it. Note: the free Contributor tier lets Meta
+  use prompts/completions to train future models.
 - 🏃 **Background commands** — append *"in background"* / *"in parallel"* to any
   command and it runs on a thread pool without blocking voice or the HUD:
   *"check weather in background"*, *"run ls -la in background"* (raw shell
@@ -147,8 +152,12 @@ Optional environment variables (or put them in a `.env` file in the
 project root — `assistant/config.py` loads it automatically):
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-..."          # enables the Muse Spark 1.3 brain
-export OPENROUTER_MODEL="meta/muse-spark-1.3"  # default; any OpenRouter model id
+export SPARK_PROVIDER="auto"                   # auto | opencode (free CLI) | openrouter
+export OPENCODE_MODEL="opencode/muse-spark-1.3-contributor-free"  # free tier model
+export OPENCODE_VARIANT="minimal"              # reasoning effort for the free tier
+export OPENCODE_RUN_TIMEOUT="180"              # seconds per free-tier answer
+export OPENROUTER_API_KEY="sk-or-..."          # enables the OpenRouter backend
+export OPENROUTER_MODEL="meta/muse-spark-1.3"  # paid model for the OpenRouter backend
 export SPARK_REASONING_EFFORT="minimal"        # minimal/low/medium/high/max (default: minimal)
 export SPARK_MAX_TOKENS="200"                  # completion budget (auto-retries smaller)
 export SPARK_TEMPERATURE="0.4"                 # answer randomness

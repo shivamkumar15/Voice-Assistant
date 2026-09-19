@@ -1,13 +1,13 @@
-"""Muse Spark 1.3 brain: advanced agentic fallback via OpenRouter.
+"""Muse Spark 1.3 brain: advanced agentic fallback, free via OpenCode.
 
-Meta's Muse Spark 1.3 (meta/muse-spark-1.3) is a 1M-context multimodal
-reasoning model tuned for long-running agentic / multi-step assistant
-workflows. It improves instruction following and coding efficiency over
-1.2 and supports OpenAI-style tool calling, reasoning effort control,
-structured output and temperature — all through the OpenRouter
-chat-completions API (OpenCode Zen serves the same model behind the
-same API shape, so pointing OPENROUTER_BASE_URL at an OpenCode-compatible
-gateway just works).
+Meta's Muse Spark 1.3 is a 1M-context multimodal reasoning model tuned for
+long-running agentic / multi-step assistant workflows. Ninja uses the
+**free Contributor tier** (`muse-spark-1.3-contributor-free`) through the
+local `opencode` CLI — the free tier only answers when called from within
+OpenCode, so Ninja shells out to `opencode run` (no API key needed, just
+`opencode` installed + logged in). OpenRouter (`meta/muse-spark-1.3`,
+needs `OPENROUTER_API_KEY`) remains as fallback / alternative; select with
+SPARK_PROVIDER=auto (default) | opencode | openrouter.
 
 Routing order in brain.py is now:
 
@@ -16,14 +16,16 @@ Routing order in brain.py is now:
 Spark is the "advanced" layer: unlike the old single-shot chat fallback
 it keeps conversation history, knows every skill, and can *act* — calling
 tools (open apps, play music, set timers, check weather, ...) over up to
-MAX_STEPS rounds before answering. Replies are cleaned for speech (no
-markdown) and kept concise so TTS sounds natural, while still being more
-complete than the old 120-token fallback.
+MAX_STEPS rounds before answering (tool use on the OpenRouter path; the
+OpenCode path answers directly without tools). Replies are cleaned for
+speech (no markdown) and kept concise so TTS sounds natural.
 """
 
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import time
 from collections import deque
 from datetime import datetime
@@ -32,11 +34,17 @@ import requests
 
 from .config import (
     ASSISTANT_NAME,
+    OPENCODE_BIN,
+    OPENCODE_MODEL,
+    OPENCODE_RUN_DIR,
+    OPENCODE_RUN_TIMEOUT,
+    OPENCODE_VARIANT,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
     OPENROUTER_MODEL,
     SPARK_HISTORY,
     SPARK_MAX_TOKENS,
+    SPARK_PROVIDER,
     SPARK_REASONING_EFFORT,
     SPARK_TEMPERATURE,
     SPARK_TOOLS_ENABLED,
@@ -44,6 +52,33 @@ from .config import (
 
 MAX_STEPS = 3
 _REQUEST_TIMEOUT = 30
+
+# Matches OpenCode CLI banners / spinners on stdout ("... > build · model").
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r")
+
+
+def opencode_available() -> bool:
+    """True when the `opencode` CLI exists (free-tier path usable)."""
+    return shutil.which(OPENCODE_BIN) is not None
+
+
+def openrouter_available() -> bool:
+    return bool(OPENROUTER_API_KEY)
+
+
+def spark_available() -> bool:
+    """True when *any* Spark backend can answer (keyless CLI or OpenRouter)."""
+    return opencode_available() or openrouter_available()
+
+
+def resolve_provider() -> str:
+    """'opencode' or 'openrouter' per SPARK_PROVIDER (auto prefers free CLI)."""
+    want = (SPARK_PROVIDER or "auto").strip().lower()
+    if want == "opencode":
+        return "opencode"
+    if want == "openrouter":
+        return "openrouter"
+    return "opencode" if opencode_available() else "openrouter"
 
 
 class _CreditError(RuntimeError):
@@ -283,14 +318,17 @@ def clean_for_speech(text: str) -> str:
 
 
 class SparkBrain:
-    """Muse Spark 1.3 agentic client with history + tool loop."""
+    """Muse Spark 1.3 client: free via OpenCode CLI, OpenRouter as fallback."""
 
     def __init__(self):
-        self.available = bool(OPENROUTER_API_KEY)
+        self.available = spark_available()
         self.model = OPENROUTER_MODEL
         self.history: deque = deque(maxlen=max(2, SPARK_HISTORY))
         if not self.available:
-            print("[spark] no OPENROUTER_API_KEY — Spark brain disabled (regex + Needle only)")
+            print("[spark] disabled — no `opencode` CLI and no OPENROUTER_API_KEY "
+                  "(regex + Needle only)")
+        else:
+            print(f"[spark] ready via {resolve_provider()}")
 
     # -- public API ------------------------------------------------------
 
@@ -302,10 +340,110 @@ class SparkBrain:
         return True, reply
 
     def ask(self, prompt: str) -> tuple[bool, str]:
-        if not self.available:
-            return False, ""
         prompt = (prompt or "").strip()
         if not prompt:
+            return False, ""
+        primary = resolve_provider()
+        order = [primary] + (["openrouter", "opencode"]
+                             if primary == "opencode" else ["opencode"])
+        last_error = ""
+        for provider in order:
+            if provider == "opencode" and not opencode_available():
+                last_error = (f"The `{OPENCODE_BIN}` CLI is not installed — "
+                              "install OpenCode and log in for the free tier, "
+                              "or set SPARK_PROVIDER=openrouter with "
+                              "OPENROUTER_API_KEY.")
+                continue
+            if provider == "openrouter" and not openrouter_available():
+                last_error = "Set OPENROUTER_API_KEY to use the OpenRouter backend."
+                continue
+            try:
+                if provider == "opencode":
+                    ok, reply = self._ask_opencode(prompt)
+                else:
+                    ok, reply = self._ask_openrouter(prompt)
+                if ok:
+                    return True, reply
+                if reply:
+                    last_error = reply
+                # else: silent refusal — try the next backend
+                continue
+            except Exception as exc:
+                last_error = str(exc) or repr(exc)
+                print(f"[spark] {provider} failed ({exc}) — trying next backend")
+                continue
+        if last_error:
+            return False, last_error
+        return False, ""
+
+    # -- OpenCode free tier (CLI backend) ----------------------------------
+
+    def _opencode_message(self, prompt: str) -> str:
+        """Prompt with bounded conversation context + no-tools instruction."""
+        parts = []
+        hist = list(self.history)
+        for i in range(0, len(hist) - 1, 2):
+            user = (hist[i].get("content") or "").strip()
+            assistant = (hist[i + 1].get("content") or "").strip()
+            if user or assistant:
+                parts.append(f"User: {user}\nAssistant: {assistant}")
+        head = ""
+        if parts:
+            head = ("Earlier in this conversation:\n" + "\n".join(parts[-6:])
+                    + "\n\n")
+        return (
+            f"{head}Answer the new question below directly in one or two "
+            f"short spoken-style sentences. No markdown. Do not use tools.\n\n"
+            f"Question: {prompt}"
+        )
+
+    @staticmethod
+    def _clean_cli_output(text: str) -> str:
+        """Strip ANSI/banners from `opencode run` stdout."""
+        t = _ANSI_RE.sub("", text or "")
+        lines = [ln.strip() for ln in t.splitlines()]
+        lines = [ln for ln in lines if ln and not ln.startswith(">")]
+        return "\n".join(lines).strip()
+
+    def _ask_opencode(self, prompt: str) -> tuple[bool, str]:
+        try:
+            OPENCODE_RUN_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(f"Couldn't prepare opencode run dir ({exc})")
+        t0 = time.monotonic()
+        try:
+            proc = subprocess.run(
+                [OPENCODE_BIN, "run", "--pure",
+                 "--model", OPENCODE_MODEL,
+                 "--variant", OPENCODE_VARIANT,
+                 "--dir", str(OPENCODE_RUN_DIR),
+                 self._opencode_message(prompt)],
+                capture_output=True, text=True,
+                timeout=max(30, OPENCODE_RUN_TIMEOUT),
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"The `{OPENCODE_BIN}` CLI is not installed — install OpenCode "
+                "or set SPARK_PROVIDER=openrouter with OPENROUTER_API_KEY.")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"The free Spark model timed out after {OPENCODE_RUN_TIMEOUT}s.")
+        reply = self._clean_cli_output(proc.stdout)
+        if proc.returncode == 0 and reply:
+            ms = int((time.monotonic() - t0) * 1000)
+            print(f"[spark] opencode free answered in {ms}ms")
+            cleaned = clean_for_speech(reply)
+            self._remember(prompt, cleaned)
+            return True, cleaned
+        err = self._clean_cli_output(proc.stderr)[-400:]
+        raise RuntimeError(
+            f"OpenCode free tier failed (exit {proc.returncode})"
+            + (f": {err}" if err else ""))
+
+    # -- OpenRouter backend --------------------------------------------------
+
+    def _ask_openrouter(self, prompt: str) -> tuple[bool, str]:
+        if not openrouter_available():
             return False, ""
         messages: list = [{"role": "system", "content": _system_prompt()}]
         messages.extend(self.history)
@@ -545,10 +683,17 @@ class SparkBrain:
     # -- diagnostics -----------------------------------------------------
 
     def status(self) -> str:
-        if not self.available:
-            return "Spark brain is disabled (set OPENROUTER_API_KEY to enable it)"
-        tools = "with tools" if SPARK_TOOLS_ENABLED else "chat only"
+        if not spark_available():
+            return ("Spark brain is disabled — install the `opencode` CLI "
+                    "(free tier) or set OPENROUTER_API_KEY")
+        provider = resolve_provider()
         hist = f"{len(self.history)//2} exchanges remembered"
+        if provider == "opencode":
+            return (
+                f"Muse Spark 1.3 free via OpenCode CLI ({OPENCODE_MODEL}, "
+                f"variant {OPENCODE_VARIANT}, {hist})."
+            )
+        tools = "with tools" if SPARK_TOOLS_ENABLED else "chat only"
         return (
             f"Muse Spark 1.3 ({self.model}, {tools}, {hist}). "
             f"Reasoning effort: {SPARK_REASONING_EFFORT or 'default'}."
@@ -563,16 +708,15 @@ def get_spark() -> SparkBrain:
     global _shared
     if _shared is None:
         _shared = SparkBrain()
-    # Re-check availability in case env was set after first import.
-    if not _shared.available and OPENROUTER_API_KEY:
-        _shared.available = True
+    # Re-check availability in case env/CLI appeared after first import.
+    _shared.available = spark_available()
     return _shared
 
 
 def wait_ready(timeout: float = 0.0) -> bool:
-    """Trivial readiness probe (API is remote; returns availability)."""
+    """Trivial readiness probe (CLI present or API key set)."""
     _ = timeout
-    return bool(OPENROUTER_API_KEY)
+    return spark_available()
 
 
 def legacy_chat(prompt: str) -> tuple[bool, str]:

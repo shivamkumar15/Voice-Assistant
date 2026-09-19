@@ -704,8 +704,16 @@ class Brain:
             return True
         if re.match(r"^run\s+.+", c):
             return True
-        if OPENROUTER_API_KEY:
-            return True  # AI fallback answers everything
+        try:
+            from .spark import spark_available
+
+            if spark_available():
+                return True  # Spark fallback (free CLI or OpenRouter) answers everything
+        except Exception:
+            from .config import OPENROUTER_API_KEY as _key
+
+            if _key:
+                return True
         # NOTE: EXIT_PHRASES intentionally not listed — stray voice "quit"
         # must stay silent; real exits are caught by the caller first.
         if self._wants_shutdown(c) or self._wants_restart(c) or self._wants_logout(c):

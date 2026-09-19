@@ -79,7 +79,26 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 # calling). Served on OpenRouter as meta/muse-spark-1.3 and on
 # OpenCode-compatible gateways behind the same chat-completions API, so
 # OPENROUTER_BASE_URL can point at either. Overrides via OPENROUTER_MODEL.
+# --- Muse Spark 1.3 provider ----------------------------------------------
+# "auto" (default): use the local OpenCode CLI's free Contributor tier when
+# the `opencode` binary is installed, otherwise OpenRouter.
+# "opencode": always the free tier via CLI. "openrouter": always OpenRouter.
+SPARK_PROVIDER = os.getenv("SPARK_PROVIDER", "auto").strip().lower()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta/muse-spark-1.3")
+
+# Free tier: Muse Spark 1.3 Contributor (Meta may use prompts/completions
+# to train future models). It is locked to "within OpenCode" use, so Ninja
+# shells out to the local `opencode run` CLI — no API key needed, just
+# `opencode` installed + logged in (same setup this repo's opencode uses).
+OPENCODE_MODEL = os.getenv(
+    "OPENCODE_MODEL", "opencode/muse-spark-1.3-contributor-free")
+OPENCODE_BIN = os.getenv("OPENCODE_BIN", "opencode")
+OPENCODE_RUN_DIR = Path(os.getenv(
+    "OPENCODE_RUN_DIR",
+    str(Path.home() / ".local" / "share" / "ninja-assistant" / "opencode-run"),
+))
+OPENCODE_VARIANT = os.getenv("OPENCODE_VARIANT", "minimal")  # reasoning effort
+OPENCODE_RUN_TIMEOUT = int(os.getenv("OPENCODE_RUN_TIMEOUT", "180"))
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # --- Muse Spark 1.3 tuning -------------------------------------------------

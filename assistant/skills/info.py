@@ -67,17 +67,17 @@ def who_are_you():
 def chat(prompt: str):
     """Muse Spark 1.3 fallback for anything that isn't a known command.
 
-    Uses the agentic Spark client (history + tools + speech-cleaned output);
-    falls back to the legacy single-shot call when tools are disabled.
+    Uses the Spark client (free OpenCode CLI tier preferred, OpenRouter
+    fallback) with history + speech-cleaned output.
     """
-    if not OPENROUTER_API_KEY:
-        return False, (
-            "That's not a command I know yet. Try: open youtube, play song , "
-            "volume up,"
-        )
     try:
-        from ..spark import get_spark, legacy_chat
+        from ..spark import get_spark, legacy_chat, spark_available
 
+        if not spark_available():
+            return False, (
+                "That's not a command I know yet. Try: open youtube, play song , "
+                "volume up,"
+            )
         spark = get_spark()
         ok, reply = spark.ask(prompt)
         if ok:
