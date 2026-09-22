@@ -58,7 +58,46 @@ button:hover { border-color: #22d3ee; color: #e8f1f9; }
 .bubble-ninja { background: rgba(34,211,238,0.08); border: 1px solid #14394a; border-radius: 10px; }
 progressbar trough { background-color: #0a1622; border-radius: 4px; min-height: 6px; }
 progressbar progress { background-color: #22d3ee; border-radius: 4px; }
+.chip { background-color: #0b1a2a; border: 1px solid #1e3a4f; border-radius: 14px;
+        padding: 3px 10px; font-size: 10px; }
+.chip:hover { border-color: #22d3ee; color: #22d3ee; }
+.suggest-bar { background-color: rgba(34,211,238,0.06); border: 1px solid #14394a;
+               border-radius: 8px; }
+scale trough { background-color: #0a1622; border-radius: 4px; min-height: 6px; }
+scale highlight { background-color: #22d3ee; border-radius: 4px; }
+scale slider { background-color: #e8f1f9; border-radius: 8px; min-width: 12px; min-height: 12px; }
+switch { background-color: #0a1622; }
+.msg-action { border: none; background: transparent; color: #5b7286; font-size: 10px; }
+.msg-action:hover { color: #22d3ee; border-color: transparent; }
+.job-row { background-color: #0a1622; border-radius: 6px; }
 """
+
+QUICK_ACTIONS = [
+    ("▶ Lofi", "play lofi beats"),
+    ("☀ Weather", "what's the weather"),
+    ("📷 Shot", "take a screenshot"),
+    ("📊 Status", "system status"),
+    ("⏲ 5 min", "set a timer for 5 minutes"),
+    ("😂 Joke", "tell me a joke"),
+    ("🌅 Brief", "briefing"),
+]
+
+# Entry autocomplete vocabulary (common commands + smart controls).
+COMPLETIONS = [
+    "open youtube", "open github", "open gmail", "open whatsapp", "open telegram",
+    "open terminal", "open vscode", "open files",
+    "play lofi beats", "play believer", "search google for ",
+    "volume up", "volume down", "set volume to 40", "mute", "brightness up",
+    "brightness down", "set brightness to 60", "take a screenshot",
+    "system status", "uptime", "what's the weather", "what's the weather in ",
+    "what time is it", "tell me a joke", "set a timer for 5 minutes",
+    "remind me to call mom in 20 minutes", "list timers", "list jobs",
+    "check job 1", "focus chrome", "list windows", "go to workspace 2",
+    "move mouse to the center", "click", "scroll down", "type hello world",
+    "turn wifi off", "turn wifi on", "read my clipboard", "empty the trash",
+    "lock screen", "briefing", "what do you remember", "my name is ",
+    "my city is ", "spark status", "clear chat history",
+]
 
 NAV_ITEMS = [
     ("SYSTEM", "system status"),
@@ -92,7 +131,12 @@ VOICE_HELP = (
     "go to workspace 2 · move this window to workspace 3 · next workspace\n"
     "• System: volume up · set volume to 40 · brightness up · take a screenshot · "
     "system status · lock screen · sleep\n"
-    "• Info: what time is it · weather in Delhi · tell me a joke"
+    "• Info: what time is it · weather in Delhi · tell me a joke\n"
+    "• Smart memory: my name is Priya · my city is Mumbai · what do you remember · "
+    "forget my name · turn it up · again · briefing\n"
+    "• HUD extras: volume/brightness sliders · ⏮⏯⏭ media keys · quick-action chips · "
+    "jobs & timers list with cancel · ↑↓ command history · Tab autocomplete · "
+    "Ctrl+M mic toggle · copy / re-run / speak on every message"
 )
 
 
@@ -178,6 +222,13 @@ class ChatWindow:
         self._latency_ms = 24
         self._weather = {"temp": "--", "city": CITY_DEFAULT.upper(),
                          "desc": "—", "hum": "—", "wind": "—", "feels": "—"}
+        # interactive state: command history, slider debounce, job refresh tick
+        self._cmd_history: list[str] = []
+        self._hist_idx: int = -1
+        self._vol_timer = None
+        self._bri_timer = None
+        self._stat_ticks = 0
+        self._suggest_cmd = ""
         self._build_css()
         self._build_window()
         GLib.timeout_add(100, self._poll_events)
@@ -357,6 +408,47 @@ class ChatWindow:
         mon_box.pack_start(self.mem_label, False, False, 0)
         self.mem_bar = Gtk.ProgressBar()
         mon_box.pack_start(self.mem_bar, False, False, 0)
+        # --- real interactive controls: volume + brightness sliders -------
+        mon_box.pack_start(self._small("VOLUME"), False, False, 2)
+        vol_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.vol_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.vol_scale.set_value(50)
+        self.vol_scale.set_hexpand(True)
+        self.vol_scale.set_show_fill_level(False)
+        self.vol_scale.connect("value-changed", self._on_vol_slider)
+        vol_row.pack_start(self.vol_scale, True, True, 0)
+        self.vol_val = Gtk.Label(label="50%")
+        self.vol_val.get_style_context().add_class("hud-dim")
+        vol_row.pack_start(self.vol_val, False, False, 0)
+        mute_btn = Gtk.Button.new_with_label("🔇")
+        mute_btn.set_tooltip_text("Toggle mute (voice: mute)")
+        mute_btn.connect("clicked", lambda b: self._send_text("mute"))
+        vol_row.pack_start(mute_btn, False, False, 0)
+        mon_box.pack_start(vol_row, False, False, 0)
+        mon_box.pack_start(self._small("BRIGHTNESS"), False, False, 2)
+        bri_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.bri_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 5, 100, 1)
+        self.bri_scale.set_value(80)
+        self.bri_scale.set_hexpand(True)
+        self.bri_scale.connect("value-changed", self._on_bri_slider)
+        bri_row.pack_start(self.bri_scale, True, True, 0)
+        self.bri_val = Gtk.Label(label="80%")
+        self.bri_val.get_style_context().add_class("hud-dim")
+        bri_row.pack_start(self.bri_val, False, False, 0)
+        mon_box.pack_start(bri_row, False, False, 0)
+        # --- media transport: prev / play-pause / next --------------------
+        media_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        media_row.set_halign(Gtk.Align.CENTER)
+        for icon, tip, key in (("⏮", "Previous track (voice: previous)",
+                                "previous"),
+                               ("⏯", "Play / pause (voice: pause)",
+                                "playpause"),
+                               ("⏭", "Next track (voice: next)", "next")):
+            btn = Gtk.Button.new_with_label(icon)
+            btn.set_tooltip_text(tip)
+            btn.connect("clicked", lambda b, k=key: self._media_key(k))
+            media_row.pack_start(btn, False, False, 0)
+        mon_box.pack_start(media_row, False, False, 4)
         mon_box.pack_start(self._small("voice: move mouse · click · scroll · type"), False, False, 4)
 
     # ---------- center ----------
@@ -386,6 +478,22 @@ class ChatWindow:
             w.get_style_context().add_class("hud-dim")
             w_sub.pack_start(w, True, True, 0)
         w_box.pack_start(w_sub, False, False, 0)
+        # city override: type a city + Set (remembered), Refresh re-fetches
+        city_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.city_entry = Gtk.Entry()
+        self.city_entry.set_placeholder_text("City…")
+        self.city_entry.set_hexpand(True)
+        self.city_entry.connect("activate", lambda w: self._set_city())
+        city_row.pack_start(self.city_entry, True, True, 0)
+        city_set = Gtk.Button.new_with_label("Set")
+        city_set.set_tooltip_text("Remember this city + refresh weather")
+        city_set.connect("clicked", lambda b: self._set_city())
+        city_row.pack_start(city_set, False, False, 0)
+        city_go = Gtk.Button.new_with_label("⟳")
+        city_go.set_tooltip_text("Refresh weather now")
+        city_go.connect("clicked", lambda b: self._refresh_weather())
+        city_row.pack_start(city_go, False, False, 0)
+        w_box.pack_start(city_row, False, False, 2)
 
         mid_info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         mid_info.set_hexpand(True)
@@ -455,6 +563,41 @@ class ChatWindow:
         self.kbd_btn.set_tooltip_text("Focus text input (type commands)")
         self.kbd_btn.connect("clicked", lambda b: self.entry.grab_focus())
         btns.pack_start(self.kbd_btn, False, False, 0)
+        self.tts_btn = Gtk.Button.new_with_label("🔊")
+        self.tts_btn.set_tooltip_text("Toggle spoken replies on/off")
+        self.tts_btn.connect("clicked", lambda b: self._toggle_tts())
+        btns.pack_start(self.tts_btn, False, False, 0)
+
+        # quick-action chips: one-tap real commands
+        chips = Gtk.FlowBox()
+        chips.set_homogeneous(False)
+        chips.set_selection_mode(Gtk.SelectionMode.NONE)
+        chips.set_max_children_per_line(8)
+        for label, cmd in QUICK_ACTIONS:
+            btn = Gtk.Button.new_with_label(label)
+            btn.get_style_context().add_class("chip")
+            btn.set_tooltip_text(f"Send: {cmd}")
+            btn.connect("clicked", lambda b, c=cmd: self._send_text(c))
+            chips.add(btn)
+        col.pack_start(chips, False, False, 0)
+
+        # smart suggestion bar (memory-driven hint with one-tap run)
+        sugg_box = Gtk.EventBox()
+        sugg_box.get_style_context().add_class("suggest-bar")
+        sugg_inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        sugg_inner.set_border_width(6)
+        sugg_box.add(sugg_inner)
+        self.suggest_label = Gtk.Label(label="✨ Listening — try 'briefing' for your daily overview")
+        self.suggest_label.get_style_context().add_class("hud-dim")
+        self.suggest_label.set_xalign(0)
+        self.suggest_label.set_hexpand(True)
+        self.suggest_label.set_line_wrap(True)
+        sugg_inner.pack_start(self.suggest_label, True, True, 0)
+        self.suggest_btn = Gtk.Button.new_with_label("Run")
+        self.suggest_btn.set_tooltip_text("Run the suggested command")
+        self.suggest_btn.connect("clicked", lambda b: self._run_suggestion())
+        sugg_inner.pack_start(self.suggest_btn, False, False, 0)
+        col.pack_start(sugg_box, False, False, 0)
 
         # activity
         act_panel, act_box = self._panel("ACTIVITY")
@@ -469,6 +612,34 @@ class ChatWindow:
         self.act_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.act_scroller.add(self.act_box)
         act_box.pack_start(self.act_scroller, True, True, 0)
+
+        # jobs & timers: live list with per-row cancel buttons
+        job_panel, job_box = self._panel("JOBS & TIMERS")
+        col.pack_start(job_panel, False, False, 0)
+        job_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.jobs_count = Gtk.Label(label="0 running")
+        self.jobs_count.get_style_context().add_class("hud-dim")
+        self.jobs_count.set_hexpand(True)
+        self.jobs_count.set_xalign(0)
+        job_head.pack_start(self.jobs_count, True, True, 0)
+        for label, tip, fn in (("⟳", "Refresh job list", self._refresh_jobs),
+                               ("List", "Say: list jobs", lambda b: self._send_text("list jobs")),
+                               ("Clear", "Clear finished jobs", self._clear_jobs)):
+            btn = Gtk.Button.new_with_label(label)
+            btn.set_tooltip_text(tip)
+            btn.connect("clicked", fn)
+            job_head.pack_start(btn, False, False, 0)
+        job_box.pack_start(job_head, False, False, 0)
+        self.jobs_scroller = Gtk.ScrolledWindow()
+        self.jobs_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.jobs_scroller.set_min_content_height(80)
+        try:
+            self.jobs_scroller.set_max_content_height(130)
+        except AttributeError:
+            self.jobs_scroller.set_size_request(-1, 110)
+        self.jobs_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        self.jobs_scroller.add(self.jobs_box)
+        job_box.pack_start(self.jobs_scroller, True, True, 0)
 
     # ---------- right stack ----------
 
@@ -488,6 +659,26 @@ class ChatWindow:
         self.batt_label.get_style_context().add_class("hud-dim")
         self.batt_label.set_xalign(1)
         status.pack_start(self.batt_label, False, False, 0)
+        # mic + voice switches: real toggles wired to the worker queues
+        toggles = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        toggles.set_halign(Gtk.Align.END)
+        mic_lbl = Gtk.Label(label="MIC")
+        mic_lbl.get_style_context().add_class("hud-dim")
+        toggles.pack_start(mic_lbl, False, False, 0)
+        self.mic_switch = Gtk.Switch()
+        self.mic_switch.set_active(True)
+        self.mic_switch.set_tooltip_text("Microphone listening on/off (Ctrl+M)")
+        self.mic_switch.connect("notify::active", lambda s, p: self._toggle_mic(s.get_active()))
+        toggles.pack_start(self.mic_switch, False, False, 0)
+        tts_lbl = Gtk.Label(label="VOICE")
+        tts_lbl.get_style_context().add_class("hud-dim")
+        toggles.pack_start(tts_lbl, False, False, 0)
+        self.tts_switch = Gtk.Switch()
+        self.tts_switch.set_active(True)
+        self.tts_switch.set_tooltip_text("Spoken replies on/off")
+        self.tts_switch.connect("notify::active", lambda s, p: self._toggle_tts(s.get_active()))
+        toggles.pack_start(self.tts_switch, False, False, 0)
+        status.pack_start(toggles, False, False, 2)
 
         term_panel, term_box = self._panel("TERMINAL")
         col.pack_start(term_panel, False, False, 0)
@@ -512,9 +703,23 @@ class ChatWindow:
         conv_box.pack_start(self.conv_scroller, True, True, 0)
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.entry = Gtk.Entry()
-        self.entry.set_placeholder_text("Ask anything… or just speak")
+        self.entry.set_placeholder_text("Ask anything… or just speak  (↑↓ history, Tab completes)")
         self.entry.set_hexpand(True)
         self.entry.connect("activate", lambda w: self._submit())
+        self.entry.connect("key-press-event", self._on_entry_key)
+        # autocomplete for real commands
+        try:
+            completion = Gtk.EntryCompletion()
+            store = Gtk.ListStore(str)
+            for c in COMPLETIONS:
+                store.append([c])
+            completion.set_model(store)
+            completion.set_text_column(0)
+            completion.set_minimum_key_length(2)
+            completion.set_popup_completion(True)
+            self.entry.set_completion(completion)
+        except Exception:
+            pass
         row.pack_start(self.entry, True, True, 0)
         send = Gtk.Button.new_with_label("➤")
         send.connect("clicked", lambda b: self._submit())
@@ -852,6 +1057,18 @@ class ChatWindow:
             self.net_draw.queue_draw()
         except Exception:
             pass
+        # periodic interactive refresh: jobs list + smart suggestion
+        self._stat_ticks += 1
+        if self._stat_ticks % 3 == 0:
+            try:
+                self._refresh_jobs()
+            except Exception:
+                pass
+        if self._stat_ticks % 15 == 0:
+            try:
+                self._update_suggestion()
+            except Exception:
+                pass
         return True
 
     def _tick_anim(self):
@@ -876,10 +1093,28 @@ class ChatWindow:
             pass
         return True
 
-    def _fetch_weather(self):
+    def _weather_city(self) -> str:
+        """Remembered city wins, then the typed box, then the default."""
+        try:
+            from .memory import get_memory
+            saved = get_memory().default_city
+            if saved:
+                return saved
+        except Exception:
+            pass
+        try:
+            typed = self.city_entry.get_text().strip()
+            if typed:
+                return typed
+        except Exception:
+            pass
+        return CITY_DEFAULT
+
+    def _fetch_weather(self, city: str | None = None):
         try:
             import requests
-            r = requests.get(f"https://wttr.in/{CITY_DEFAULT}?format=j1", timeout=10)
+            target = city or self._weather_city()
+            r = requests.get(f"https://wttr.in/{target}?format=j1", timeout=10)
             if not r.ok:
                 return
             data = r.json()
@@ -889,20 +1124,49 @@ class ChatWindow:
             hum = cur.get("humidity", "—")
             wind = cur.get("windspeedKmph", "—")
             feels = cur.get("FeelsLikeC", "—")
-            GLib.idle_add(self._apply_weather, str(temp), str(desc), str(hum), str(wind), str(feels))
+            GLib.idle_add(self._apply_weather, str(temp), str(desc), str(hum),
+                          str(wind), str(feels), target)
         except Exception:
             return
 
-    def _apply_weather(self, temp, desc, hum, wind, feels):
-        self._weather.update({"temp": temp, "desc": desc, "hum": hum, "wind": wind, "feels": feels})
+    def _apply_weather(self, temp, desc, hum, wind, feels, city: str | None = None):
+        city = city or self._weather_city()
+        self._weather.update({"temp": temp, "desc": desc, "hum": hum,
+                              "wind": wind, "feels": feels,
+                              "city": city.upper()})
         self.w_temp.set_text(f"{temp}°C")
-        self.w_city.set_text(f"{CITY_DEFAULT.upper()}, PH")
+        self.w_city.set_text(f"{city.upper()}")
         self.w_desc.set_text(desc.lower())
         self.w_hum.set_text(f"HUMIDITY\n{hum}%")
-        self.w_wind.set_text(f"WIND\n{wind} m/s" if wind == "—" else f"WIND\n{float(wind)/3.6:.1f} m/s")
+        try:
+            wind_txt = f"WIND\n{float(wind)/3.6:.1f} m/s" if wind != "—" else "WIND\n—"
+        except Exception:
+            wind_txt = f"WIND\n{wind}"
+        self.w_wind.set_text(wind_txt)
         self.w_feels.set_text(f"FEELS\n{feels}°C")
-        self.top_weather.set_text(f"☁ {temp}°C  {CITY_DEFAULT.upper()}")
+        self.top_weather.set_text(f"☁ {temp}°C  {city.upper()}")
         return False
+
+    def _set_city(self):
+        try:
+            city = self.city_entry.get_text().strip()
+        except Exception:
+            return
+        if not city:
+            return
+        try:
+            from .memory import get_memory
+            get_memory().set("default_city", city)
+        except Exception:
+            pass
+        self._activity(f"Default city set to {city}", "cyan")
+        self._add_notice(f"Default city set to {city} — refreshing weather…")
+        threading.Thread(target=self._fetch_weather, args=(city,),
+                         daemon=True).start()
+
+    def _refresh_weather(self):
+        threading.Thread(target=self._fetch_weather, daemon=True).start()
+        self._activity("Weather refreshing…", "dim")
 
     # ---------- worker events ----------
 
@@ -989,6 +1253,26 @@ class ChatWindow:
         body.set_selectable(True)
         inner.pack_start(head, False, False, 0)
         inner.pack_start(body, False, False, 0)
+        # per-message actions: copy always; user msgs get re-run, ninja gets speak
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        copy_btn = Gtk.Button.new_with_label("⧉ copy")
+        copy_btn.get_style_context().add_class("msg-action")
+        copy_btn.set_tooltip_text("Copy message to clipboard")
+        copy_btn.connect("clicked", lambda b, t=text: self._copy_text(t))
+        actions.pack_start(copy_btn, False, False, 0)
+        if role == "user":
+            rerun = Gtk.Button.new_with_label("↻ re-run")
+            rerun.get_style_context().add_class("msg-action")
+            rerun.set_tooltip_text("Send this command again")
+            rerun.connect("clicked", lambda b, t=text: self._send_text(t))
+            actions.pack_start(rerun, False, False, 0)
+        else:
+            speak_btn = Gtk.Button.new_with_label("🔊 speak")
+            speak_btn.get_style_context().add_class("msg-action")
+            speak_btn.set_tooltip_text("Speak this reply again")
+            speak_btn.connect("clicked", lambda b, t=text: self._speak_text(t))
+            actions.pack_start(speak_btn, False, False, 0)
+        inner.pack_start(actions, False, False, 0)
         bubble.add(inner)
         bubble.set_halign(Gtk.Align.START if role == "ninja" else Gtk.Align.END)
         if role == "ninja":
@@ -1062,7 +1346,13 @@ class ChatWindow:
     def _send_text(self, text):
         if self._worker_done or not (text or "").strip():
             return
-        self.worker.commands.put(("text", text.strip()))
+        text = text.strip()
+        # track typed history for ↑/↓ recall
+        if not self._cmd_history or self._cmd_history[-1] != text:
+            self._cmd_history.append(text)
+            del self._cmd_history[:-50]
+        self._hist_idx = len(self._cmd_history)
+        self.worker.commands.put(("text", text))
 
     def _submit(self):
         if not self.entry.get_sensitive():
@@ -1072,6 +1362,36 @@ class ChatWindow:
             return
         self.entry.set_text("")
         self._send_text(text)
+
+    def _on_entry_key(self, widget, event):
+        """Up/Down = command history, Ctrl+M = mic toggle, Esc = clear."""
+        try:
+            key = event.keyval
+            if key in (Gdk.KEY_Up, Gdk.KEY_KP_Up):
+                if self._cmd_history:
+                    self._hist_idx = max(0, self._hist_idx - 1)
+                    self.entry.set_text(self._cmd_history[self._hist_idx])
+                    self.entry.set_position(-1)
+                return True
+            if key in (Gdk.KEY_Down, Gdk.KEY_KP_Down):
+                if self._cmd_history:
+                    self._hist_idx = min(len(self._cmd_history),
+                                         self._hist_idx + 1)
+                    txt = (self._cmd_history[self._hist_idx]
+                           if self._hist_idx < len(self._cmd_history) else "")
+                    self.entry.set_text(txt)
+                    self.entry.set_position(-1)
+                return True
+            if key == Gdk.KEY_Escape:
+                self.entry.set_text("")
+                return True
+            if (event.state & Gdk.ModifierType.CONTROL_MASK) and key in (
+                    ord("m"), ord("M")):
+                self._toggle_mic()
+                return True
+        except Exception:
+            pass
+        return False
 
     def _run_nav(self, cmd):
         if cmd == "__focus_chat__":
@@ -1085,10 +1405,231 @@ class ChatWindow:
             return
         self._send_text(cmd)
 
-    def _toggle_mic(self):
-        new_state = not (self.worker.mic_enabled)
+    def _toggle_mic(self, want: bool | None = None):
+        new_state = bool(want) if want is not None else not self.worker.mic_enabled
         self.worker.commands.put(("mic", new_state))
         self.mic_state.set_text("MIC   ● Listening" if new_state else "MIC   ○ Muted")
+        try:
+            if self.mic_switch.get_active() != new_state:
+                self.mic_switch.set_active(new_state)
+        except Exception:
+            pass
+        self._activity(f"Microphone {'enabled' if new_state else 'muted'}", "dim")
+
+    def _toggle_tts(self, want: bool | None = None):
+        if want is None:
+            want = not self.worker.tts_enabled
+        else:
+            want = bool(want)
+        self.worker.commands.put(("tts", want))
+        try:
+            if self.tts_switch.get_active() != want:
+                self.tts_switch.set_active(want)
+        except Exception:
+            pass
+        self._activity(f"Voice replies {'on' if want else 'off'}", "dim")
+
+    # ----- sliders / media (direct skill calls, no TTS spam) -----
+    def _on_vol_slider(self, scale):
+        try:
+            val = int(scale.get_value())
+            self.vol_val.set_text(f"{val}%")
+            if self._vol_timer is not None:
+                GLib.source_remove(self._vol_timer)
+            self._vol_timer = GLib.timeout_add(
+                350, self._apply_volume, val)
+        except Exception:
+            pass
+
+    def _apply_volume(self, val: int):
+        self._vol_timer = None
+        def _do():
+            try:
+                from .skills import system_ctl
+                ok, reply = system_ctl.volume_set(int(val))
+                GLib.idle_add(self._activity, reply, "cyan" if ok else "dim")
+            except Exception as exc:
+                GLib.idle_add(self._activity, f"Volume failed: {exc}", "dim")
+        threading.Thread(target=_do, daemon=True).start()
+        return False
+
+    def _on_bri_slider(self, scale):
+        try:
+            val = int(scale.get_value())
+            self.bri_val.set_text(f"{val}%")
+            if self._bri_timer is not None:
+                GLib.source_remove(self._bri_timer)
+            self._bri_timer = GLib.timeout_add(
+                350, self._apply_brightness, val)
+        except Exception:
+            pass
+
+    def _apply_brightness(self, val: int):
+        self._bri_timer = None
+        def _do():
+            try:
+                from .skills import system_ctl
+                ok, reply = system_ctl.brightness_set(int(val))
+                GLib.idle_add(self._activity, reply, "cyan" if ok else "dim")
+            except Exception as exc:
+                GLib.idle_add(self._activity, f"Brightness failed: {exc}", "dim")
+        threading.Thread(target=_do, daemon=True).start()
+        return False
+
+    def _media_key(self, key: str):
+        def _do():
+            try:
+                from .skills import system_ctl
+                ok, reply = system_ctl.media_key(key)
+                GLib.idle_add(self._activity, f"Media {key}: {reply}",
+                              "cyan" if ok else "dim")
+            except Exception as exc:
+                GLib.idle_add(self._activity, f"Media failed: {exc}", "dim")
+        threading.Thread(target=_do, daemon=True).start()
+
+    # ----- message helpers -----
+    def _copy_text(self, text: str):
+        try:
+            clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+            clip.set_text(text or "", -1)
+            self._activity("Copied to clipboard", "dim")
+        except Exception:
+            pass
+
+    def _speak_text(self, text: str):
+        def _do():
+            try:
+                from . import mouth
+                mouth.speak(text or "")
+            except Exception:
+                pass
+        threading.Thread(target=_do, daemon=True).start()
+
+    # ----- jobs & timers panel -----
+    def _job_rows(self):
+        """Return [(kind, id, label, status)] for jobs + timers."""
+        rows: list[tuple] = []
+        try:
+            from . import background
+            with background._lock:
+                for jid, job in sorted(background._jobs.items()):
+                    rows.append(("job", jid, job.get("label", "task"),
+                                 job.get("status", "?")))
+        except Exception:
+            pass
+        try:
+            from .skills import reminders
+            import time as _t
+            with reminders._lock:
+                for tid, entry in sorted(reminders._timers.items()):
+                    left = max(0, int(entry["fires_at"] - _t.time()))
+                    rows.append(("timer", tid,
+                                 f"{entry.get('label', 'timer')} ({left}s left)",
+                                 "running"))
+        except Exception:
+            pass
+        return rows[-8:]
+
+    def _refresh_jobs(self, *args):
+        for child in list(self.jobs_box.get_children()):
+            self.jobs_box.remove(child)
+        rows = self._job_rows()
+        running = sum(1 for r in rows if r[3] == "running")
+        try:
+            self.jobs_count.set_text(
+                f"{running} running · {len(rows)} total" if rows else "idle — no jobs")
+        except Exception:
+            pass
+        if not rows:
+            lb = Gtk.Label(label="No jobs or timers — try 'set a timer for 5 minutes'")
+            lb.get_style_context().add_class("hud-dim")
+            lb.set_xalign(0)
+            self.jobs_box.pack_start(lb, False, False, 0)
+        for kind, jid, label, status in rows:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            row.get_style_context().add_class("job-row")
+            dot = "●" if status == "running" else ("✔" if status == "done" else "✖")
+            icon = Gtk.Label(label=f"{dot} #{jid}")
+            icon.get_style_context().add_class(
+                "hud-cyan" if status == "running"
+                else ("hud-green" if status == "done" else "hud-dim"))
+            row.pack_start(icon, False, False, 4)
+            name = Gtk.Label(label=f"{kind}: {label[:40]}")
+            name.set_xalign(0)
+            name.set_hexpand(True)
+            name.set_ellipsize(Pango.EllipsizeMode.END)
+            name.get_style_context().add_class("hud-dim")
+            row.pack_start(name, True, True, 0)
+            if status == "running":
+                cancel = Gtk.Button.new_with_label("✖")
+                cancel.set_tooltip_text(f"Cancel {kind} #{jid}")
+                cancel.connect("clicked", lambda b, k=kind, i=jid:
+                               self._cancel_row(k, i))
+                row.pack_start(cancel, False, False, 0)
+            else:
+                st = Gtk.Label(label=status)
+                st.get_style_context().add_class("hud-dim")
+                row.pack_start(st, False, False, 4)
+            self.jobs_box.pack_start(row, False, False, 0)
+        self.win.show_all()
+
+    def _cancel_row(self, kind: str, jid: int):
+        def _do():
+            try:
+                if kind == "job":
+                    from . import background
+                    _, reply = background.cancel_job(jid)
+                else:
+                    from .skills import reminders
+                    _, reply = reminders.cancel_timer(jid)
+                GLib.idle_add(self._activity, reply, "cyan")
+                GLib.idle_add(self._refresh_jobs)
+            except Exception as exc:
+                GLib.idle_add(self._activity, f"Cancel failed: {exc}", "dim")
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _clear_jobs(self, *args):
+        def _do():
+            try:
+                from . import background
+                _, reply = background.clear_finished()
+                GLib.idle_add(self._activity, reply, "dim")
+                GLib.idle_add(self._refresh_jobs)
+            except Exception:
+                pass
+        threading.Thread(target=_do, daemon=True).start()
+
+    # ----- smart suggestion -----
+    def _update_suggestion(self):
+        hint, cmd = "", ""
+        try:
+            from .memory import get_memory
+            hint = get_memory().suggestion()
+        except Exception:
+            hint = ""
+        if hint:
+            import re as _re
+            m = _re.search(r"'([^']+)'", hint)
+            cmd = m.group(1) if m else ""
+            self.suggest_label.set_text(f"✨ {hint}")
+            self._suggest_cmd = cmd
+            try:
+                self.suggest_btn.set_sensitive(bool(cmd))
+            except Exception:
+                pass
+        else:
+            self.suggest_label.set_text("✨ Listening — try 'briefing' for your daily overview")
+            self._suggest_cmd = "briefing"
+            try:
+                self.suggest_btn.set_sensitive(True)
+            except Exception:
+                pass
+
+    def _run_suggestion(self):
+        if self._suggest_cmd:
+            self._send_text(self._suggest_cmd)
+        else:
+            self.entry.grab_focus()
 
     def _show_help(self):
         dlg = Gtk.MessageDialog(
@@ -1106,9 +1647,11 @@ class ChatWindow:
         self._set_state("idle")
         self.core_status.set_text("NINJA is offline")
         self.online_pill.set_text("● OFFLINE")
-        for w in (self.entry, self.cam_btn, self.mic_btn, self.kbd_btn):
+        for w in (self.entry, self.cam_btn, self.mic_btn, self.kbd_btn,
+                  getattr(self, "tts_btn", None), getattr(self, "suggest_btn", None)):
             try:
-                w.set_sensitive(False)
+                if w is not None:
+                    w.set_sensitive(False)
             except Exception:
                 pass
         self._add_notice("NINJA has shut down — close the window to exit.")
@@ -1125,12 +1668,26 @@ class ChatWindow:
         self._activity("NINJA HUD online — listening continuously, just speak", "cyan")
         self._activity("Chain tasks: 'open youtube and play believer'", "dim")
         self._activity("Voice mouse ready: move / click / scroll / drag", "dim")
-        self._add_message("ninja", "NINJA online and listening to everything you say — "
+        self._activity("Smart memory on: 'my name is …' · 'turn it up' · 'again' · 'briefing'", "dim")
+        try:
+            from .memory import get_memory
+            name = get_memory().user_name
+            hello = f"Welcome back, {name}! " if name else ""
+        except Exception:
+            hello = ""
+        self._add_message("ninja", f"{hello}NINJA online and listening to everything you say — "
                                    "no wake word needed. Chain tasks with 'and', e.g. "
                                    "'open youtube and play believer', or 'open whatsapp "
-                                   "and text mom hello'. I can move and click the mouse, "
-                                   "type, manage windows, apps, volume, screenshots and more.")
+                                   "and text mom hello'. I now remember you: try 'my name is …', "
+                                   "'my city is …', 'turn it up', 'again', or 'briefing'. "
+                                   "Use the sliders, chips, jobs list and ↑↓ history below — "
+                                   "everything is clickable.")
         self.win.show_all()
         self.mem_badge.set_visible(False)
+        try:
+            self._refresh_jobs()
+            self._update_suggestion()
+        except Exception:
+            pass
         self.entry.grab_focus()
         Gtk.main()

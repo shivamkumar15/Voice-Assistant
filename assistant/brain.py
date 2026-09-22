@@ -12,6 +12,7 @@ from datetime import datetime
 
 from . import background
 from .config import OPENROUTER_API_KEY
+from .memory import get_memory
 from .needle_brain import NeedleBrain
 from .skills import apps, info, input_control, reminders, system_ctl, web, windows
 
@@ -21,6 +22,10 @@ class Brain:
         self.pending_confirm = None  # "shutdown" | "restart" | "logout"
         self.needle = NeedleBrain()  # stays unavailable when disabled
         self._job_listener = None
+        try:
+            self.memory = get_memory()
+        except Exception:
+            self.memory = None
         # Background completions funnel through here, then out to the
         # worker (HUD + voice) when one is attached.
         background.set_listener(self._on_job_done)
@@ -627,34 +632,183 @@ class Brain:
         if not text:
             return False, ""
         strict = from_voice and not addressed
+        # --- smart layer: setters, briefing, memory, fuzzy -----------------
+        try:
+            from . import smart as _smart
+            mem = self.memory
+            if mem is not None:
+                setter_reply = _smart.check_smart_setters(text, mem)
+                if setter_reply:
+                    mem.remember(text, setter_reply, ok=True)
+                    return True, setter_reply
+                smart_cmd = _smart.preprocess(text, mem)
+                if smart_cmd and smart_cmd != text:
+                    # remember the raw phrasing -> resolved mapping
+                    try:
+                        mem.learn_correction(text, smart_cmd)
+                    except Exception:
+                        pass
+                    text = smart_cmd
+                # "good morning" / "briefing" -> proactive daily brief
+                if re.fullmatch(
+                    r"(good (morning|afternoon|evening)|daily briefing|briefing|"
+                    r"start my day|morning briefing)", text.lower().strip(" .!?")):
+                    return True, self._daily_briefing()
+                # "what do you remember" / "forget ..." memory controls
+                mem_reply = self._handle_memory_commands(text)
+                if mem_reply is not None:
+                    return True, mem_reply
+        except Exception:
+            pass
         if self.pending_confirm:
-            return True, self.handle(text)
+            return True, self._handle_and_remember(text)
         # Whole chain asked in background: "A and B in background".
         clean_all, want_bg_all = background.strip_background_marker(text)
         if want_bg_all and clean_all:
-            return True, self._dispatch_background(clean_all)
+            reply = self._dispatch_background(clean_all)
+            self._remember(text, reply, ok=True)
+            return True, reply
         parts = self._split_chain(text)
         if len(parts) == 1:
             # Single "X in background" also returns immediately.
             clean, want_bg = background.strip_background_marker(parts[0])
             if want_bg and clean.strip():
-                return True, self._dispatch_background(clean)
+                reply = self._dispatch_background(clean)
+                self._remember(parts[0], reply, ok=True)
+                return True, reply
             if self._is_known_command(parts[0]):
-                return True, self.handle(parts[0], strict=strict)
+                return True, self._handle_and_remember(parts[0], strict=strict)
             # Unknown phrasing: Needle (the local tool-calling model) gets
             # first shot at natural language, then the regex + AI chat
             # fallback. use_needle is skipped in handle() to avoid double
             # execution.
             handled, reply = self.needle.handle(parts[0], strict=strict)
             if handled:
+                self._remember(parts[0], reply, ok=True)
                 return True, reply
-            return False, self.handle(parts[0], use_needle=False)
+            # handle() returns str; wrap for (handled, reply)
+            reply2 = self._handle_and_remember(parts[0], use_needle=False)
+            return False, reply2
         replies = []
         for i, part in enumerate(parts):
-            replies.append(self.handle(part))
+            # per-step smart resolve so "open youtube and turn it up" works
+            step = part
+            try:
+                from . import smart as _smart2
+                if self.memory is not None:
+                    step = _smart2.preprocess(part, self.memory) or part
+            except Exception:
+                pass
+            replies.append(self._handle_and_remember(step))
             if i < len(parts) - 1:
                 time.sleep(2.0 if self._needs_settle(part) else 0.6)
-        return True, ". ".join(replies)
+        joined = ". ".join(replies)
+        self._remember(text, joined, ok=True)
+        return True, joined
+
+    def _handle_and_remember(self, text: str, strict: bool = False,
+                             use_needle: bool = True) -> str:
+        """Run handle() then store the exchange in smart memory."""
+        reply = self.handle(text, strict=strict, use_needle=use_needle)
+        self._remember(text, reply, ok=True)
+        return reply
+
+    def _remember(self, cmd: str, reply: str, ok: bool = True):
+        try:
+            if self.memory is not None:
+                self.memory.remember(cmd, reply, ok=ok)
+        except Exception:
+            pass
+
+    def _handle_memory_commands(self, text: str):
+        """'remember X', 'forget ...', 'what do you remember' controls."""
+        c = (text or "").strip()
+        low = c.lower().strip(" .!?")
+        mem = self.memory
+        if mem is None:
+            return None
+        # what do you remember / who am i
+        if re.fullmatch(r"(what do you (remember|know about me)|who am i|my preferences)", low):
+            bits = []
+            if mem.user_name:
+                bits.append(f"your name is {mem.user_name}")
+            if mem.default_city:
+                bits.append(f"default city is {mem.default_city}")
+            fav = mem.favorite("music")
+            if fav:
+                bits.append(f"favorite music is {fav}")
+            if not bits:
+                return "I don't remember anything about you yet. Say 'my name is ...' or 'my city is ...'."
+            return "I remember " + ", ".join(bits) + "."
+        m = re.match(r"^remember that (.+)$", low, re.IGNORECASE)
+        if m:
+            fact = m.group(1).strip()
+            # "remember that my favorite music is X"
+            m2 = re.match(r"my (favourite|favorite) (music|song) is (.+)", fact, re.IGNORECASE)
+            if m2:
+                mem.set("music", m2.group(3).strip())
+                return f"Got it — your favorite music is {m2.group(3).strip()}."
+            return f"I'll remember that: {fact}."
+        m = re.match(r"^forget (everything|all|my name|my city|my music)$", low)
+        if m:
+            what = m.group(1)
+            if what in ("everything", "all"):
+                mem.data.update({"user_name": "", "default_city": "",
+                                 "favorites": {"music": "", "app": "", "website": ""},
+                                 "aliases": {}, "corrections": {}})
+                mem.save()
+                return "Forgot everything I knew about you."
+            if "name" in what:
+                mem.set("user_name", "")
+                return "Forgot your name."
+            if "city" in what:
+                mem.set("default_city", "")
+                return "Forgot your default city."
+            mem.set("music", "")
+            return "Forgot your favorite music."
+        # "remember <nick> is <canonical>" -> alias, e.g. "remember mom is Priya"
+        m = re.match(r"^remember (\w[\w .'-]{0,20}) is ([\w .@+'-]{1,40})$", c, re.IGNORECASE)
+        if m and "favorite" not in low and "favourite" not in low:
+            mem.add_alias(m.group(1).strip(), m.group(2).strip())
+            return f"Got it — I'll remember {m.group(1).strip()} as {m.group(2).strip()}."
+        return None
+
+    def _daily_briefing(self) -> str:
+        """Proactive morning brief: greeting + time + weather + system."""
+        try:
+            from . import smart as _smart
+            head = _smart.smart_greeting(self.memory) if self.memory else "Good day."
+        except Exception:
+            head = "Good day."
+        parts = [head]
+        try:
+            _, t = info.get_time()
+            parts.append(t + ".")
+        except Exception:
+            pass
+        try:
+            city = ""
+            if self.memory is not None:
+                city = self.memory.default_city
+            from .config import WEATHER_CITY_DEFAULT as _def
+            ok_w, w = info.get_weather(city or _def)
+            if ok_w:
+                parts.append(w + ".")
+            elif city or _def:
+                parts.append(w + ".")
+            # else: no city configured — skip weather instead of asking mid-brief
+        except Exception:
+            pass
+        try:
+            _, s = system_ctl.system_status()
+            # keep briefing short: CPU + battery only
+            short = ". ".join(s.split(". ")[:2])
+            parts.append(short + ".")
+        except Exception:
+            pass
+        out = " ".join(parts)
+        self._remember("briefing", out, ok=True)
+        return out
 
     def _split_chain(self, text: str):
         """Split into command steps, or [text] when splitting is unsafe."""
@@ -713,6 +867,15 @@ class Brain:
         if re.fullmatch(r"(clear|reset|forget)( the| my)? (chat|ai|conversation)( history)?", c):
             return True
         if re.match(r"^run\s+.+", c):
+            return True
+        # Smart-layer commands are always known (memory, briefing, follow-ups).
+        if re.fullmatch(
+            r"(good (morning|afternoon|evening)|daily briefing|briefing|"
+            r"start my day|morning briefing|what do you (remember|know about me)|"
+            r"who am i|my preferences|forget (everything|all|my name|my city|my music)|"
+            r"my name is .+|call me .+|my city is .+|remember( that)? .+|"
+            r"turn it (up|down)|louder|quieter|brighter|dimmer|(do|play) (that|it) again|"
+            r"again|repeat( that)?|one more time)", c.strip(" .!?")):
             return True
         try:
             from .spark import spark_available
