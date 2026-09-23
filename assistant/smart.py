@@ -25,14 +25,18 @@ _VERBS = ["open", "close", "play", "search", "volume", "brightness", "take",
           "show", "tell", "what", "remind", "timer", "message", "whatsapp",
           "lock", "sleep", "shutdown", "restart", "mute", "unmute", "pause",
           "resume", "skip", "next", "previous", "comment", "find", "run",
-          "check", "cancel", "clear", "spark", "screenshot"]
+          "check", "cancel", "clear", "spark", "screenshot", "email", "summarize",
+          "delete", "rename", "install", "git", "monitor"]
+
 
 _NOUNS = ["youtube", "google", "github", "gmail", "whatsapp", "telegram",
           "terminal", "vscode", "code", "chrome", "firefox", "volume",
           "brightness", "screenshot", "weather", "timer", "clipboard",
           "trash", "wifi", "bluetooth", "mouse", "window", "windows",
           "workspace", "music", "song", "video", "joke", "time", "date",
-          "battery", "system", "status"]
+          "battery", "system", "status", "file", "folder", "directory", "pdf",
+          "document", "notification", "email", "git", "code", "game"]
+
 
 _FILLER_PREFIX = re.compile(
     r"^(please\s+|could you(\s+please)?\s+|would you(\s+please)?\s+|can you(\s+please)?\s+|"

@@ -208,7 +208,7 @@ def find_files(query: str = "", folder: str | Path | None = None,
         query = query[:-len(suffix)]
     found: list[Path] = []
     for root in roots:
-        for current, _, files in _walk(root, max(FILE_SEARCH_MAX_DEPTH, 4)):
+        for current, _, files in _walk(root, max_depth=FILE_SEARCH_MAX_DEPTH):
             for name in files:
                 if name.startswith("."):
                     continue
@@ -255,6 +255,8 @@ def open_path(path: str | Path) -> tuple[bool, str]:
 
 
 def _atomic_write(path: Path, content: str, overwrite: bool) -> tuple[bool, str]:
+    if len(content) > FILE_MAX_READ_BYTES:
+        return False, "That text is too large to save safely"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not overwrite and path.exists():
@@ -320,7 +322,7 @@ def move_file(source: str | Path, destination: str | Path, overwrite: bool = Fal
 
 def rename_file(source: str | Path, new_name: str):
     new_name = str(new_name or "").strip().strip("'\"")
-    if not new_name or "/" in new_name or "\\" in new_name:
+    if not new_name or new_name in (".", "..") or "/" in new_name or "\\" in new_name:
         return False, "Tell me a new file name without slashes"
     try:
         src = resolve_path(source, must_exist=True)
@@ -330,24 +332,21 @@ def rename_file(source: str | Path, new_name: str):
 
 
 def _trash(path: Path) -> tuple[bool, str]:
+    commands = []
     if shutil.which("gio"):
+        commands.append(["gio", "trash", "--", str(path)])
+    if shutil.which("trash-put"):
+        commands.append(["trash-put", str(path)])
+    for command in commands:
         try:
             result = subprocess.run(
-                ["gio", "trash", "--", str(path)],
-                capture_output=True, text=True, timeout=8,
+                command, capture_output=True, text=True, timeout=8,
             )
             if result.returncode == 0:
                 return True, f"Moved {_display(path)} to the trash"
         except (OSError, subprocess.SubprocessError):
-            pass
-    try:
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
-        return True, f"Deleted {_display(path)}"
-    except OSError as exc:
-        return False, f"I couldn't delete that: {exc}"
+            continue
+    return False, "No desktop trash service is available; I won't permanently delete it"
 
 
 def delete_path(path: str | Path):

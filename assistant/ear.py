@@ -38,7 +38,9 @@ _COMMAND_KEYWORDS = (
     "bluetooth", "wifi", "clipboard", "trash", "mouse", "click", "scroll",
     "type", "press", "open", "close", "focus", "minimise", "minimize",
     "maximise", "maximize", "play", "pause", "weather", "joke", "lock",
-    "sleep", "shutdown", "restart",
+    "sleep", "shutdown", "restart", "notification", "notifications", "file",
+    "files", "folder", "directory", "pdf", "document", "summarize", "summary",
+    "study", "plan", "git", "code", "monitor", "screen", "email", "form",
 )
 
 

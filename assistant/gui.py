@@ -95,7 +95,9 @@ COMPLETIONS = [
     "move mouse to the center", "click", "scroll down", "type hello world",
     "turn wifi off", "turn wifi on", "read my clipboard", "empty the trash",
     "lock screen", "briefing", "what do you remember", "my name is ",
-    "my city is ", "spark status", "clear chat history",
+    "my city is ", "remember that I prefer concise answers", "spark status",
+    "clear chat history", "find the latest PDF in my CS folder", "read notifications",
+    "git status", "create a study plan",
 ]
 
 VOICE_HELP = (
@@ -116,8 +118,11 @@ VOICE_HELP = (
     "• Radios: turn wifi off · switch bluetooth on · read my clipboard\n"
     "• Windows: focus chrome · minimise · maximise · list windows · "
     "go to workspace 2 · move this window to workspace 3\n"
+    "• Files & study: open my CS folder · find the latest PDF · summarize it · "
+    "create a study plan · read notifications\n"
+    "• Developer: git status · git diff · run python code (confirmation required)\n"
     "• Smart memory: my name is Priya · my city is Mumbai · what do you remember · "
-    "turn it up · again · briefing"
+    "remember that I prefer concise answers · turn it up · again · briefing"
 )
 
 

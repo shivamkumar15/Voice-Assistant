@@ -8,6 +8,7 @@ piper-tts>=1.8          # neural TTS voice (espeak fallback still works without 
 psutil>=5.9
 requests>=2.31
 PyAutoGUI>=0.9.54
+pypdf>=4.0
 
 # Optional: AI chat fallback via OpenRouter (needs OPENROUTER_API_KEY)
 # (uses `requests`, already listed above — no extra package needed)
