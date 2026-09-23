@@ -2,8 +2,6 @@
 "remind me to call mom in 20 minutes". Fires with voice + desktop alert."""
 
 import re
-import shutil
-import subprocess
 import threading
 import time
 
@@ -53,9 +51,10 @@ def _fire(timer_id: int):
     label = entry["label"]
     message = f"Timer done: {label}" if label != "timer" else "Time is up!"
     try:
-        if shutil.which("notify-send"):
-            subprocess.run(["notify-send", "Ninja", message], timeout=5)
-    except (OSError, subprocess.SubprocessError):
+        from . import notifications
+
+        notifications.publish("Ninja", message)
+    except Exception:
         pass
     try:
         from .. import mouth

@@ -8,13 +8,19 @@ SpeechRecognition dynamic threshold: laptop mics produce short loud bursts
 assistant deaf. A median floor over recent history ignores bursts.
 """
 
-import audioop
+try:
+    import audioop
+except ModuleNotFoundError:
+    audioop = None
+
 import collections
 import contextlib
+import math
 import os
 import queue
 import re
 import statistics
+from array import array
 import subprocess
 import sys
 import threading
@@ -34,6 +40,26 @@ _COMMAND_KEYWORDS = (
     "maximise", "maximize", "play", "pause", "weather", "joke", "lock",
     "sleep", "shutdown", "restart",
 )
+
+
+def _rms(data: bytes, width: int) -> int:
+    if audioop is not None:
+        return audioop.rms(data, width)
+    if not data:
+        return 0
+    if width == 1:
+        samples = [abs(value - 128) for value in data]
+    elif width == 2:
+        sample_array = array("h")
+        sample_array.frombytes(data[:len(data) - len(data) % 2])
+        samples = [value * value for value in sample_array]
+    elif width == 4:
+        sample_array = array("i")
+        sample_array.frombytes(data[:len(data) - len(data) % 4])
+        samples = [value * value for value in sample_array]
+    else:
+        samples = [value * value for value in data]
+    return int(math.sqrt(sum(samples) / max(1, len(samples))))
 
 
 def _pick_transcript(result) -> str:
@@ -213,7 +239,7 @@ class Ear:
                 continue
             if not data:
                 continue
-            level = audioop.rms(data, width)
+            level = _rms(data, width)
             self._push_audio_level(level)
             history.append(level)
             preroll.append(data)
@@ -235,7 +261,7 @@ class Ear:
                 if not data:
                     break
                 frames.append(data)
-                level = audioop.rms(data, width)
+                level = _rms(data, width)
                 self._push_audio_level(level)
                 history.append(level)
                 quiet_run = quiet_run + 1 if level < gate else 0

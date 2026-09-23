@@ -59,8 +59,11 @@ def who_are_you():
         "page, comment on posts, set timers and reminders, switch wifi and "
         "bluetooth, read the clipboard, type and click for you, move the mouse by "
         "voice, scroll, drag, manage windows, change volume and brightness, "
-        "take screenshots, control music, lock or sleep the computer, and "
-        "answer questions, switch workspaces, and move windows between them."
+        "take screenshots, read local documents, create study plans, manage files "
+        "and Git repositories, read recent notifications, fill focused browser forms, "
+        "monitor system resources, "
+        "control music, lock or sleep the computer, and answer questions, switch "
+        "workspaces, and move windows between them."
     )
 
 

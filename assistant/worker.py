@@ -29,14 +29,19 @@ from .config import ASSISTANT_NAME, EXIT_PHRASES, FOLLOWUP_TIMEOUT, WAKE_WORDS
 
 def strip_wake_word(text: str):
     """Return (had_wake_word, remaining_command)."""
-    lowered = text.lower().strip()
+    lowered = re.sub(r"\s+", " ", (text or "").lower().strip())
     for wake in WAKE_WORDS:
+        wake = re.sub(r"\s+", " ", wake.strip().lower())
+        if not wake:
+            continue
         if lowered == wake:
             return True, ""
-        # "alexa open youtube" / "hey alexa, open youtube"
-        m = re.match(rf"^(?:hey |hi |ok |okay )?{wake}[,!.]?\s+(.+)$", lowered)
-        if m:
-            return True, m.group(1).strip()
+        pattern = re.escape(wake)
+        if not wake.startswith(("hey ", "hi ", "ok ", "okay ")):
+            pattern = rf"(?:(?:hey|hi|ok|okay)\s+)?{pattern}"
+        match = re.match(rf"^{pattern}[,!.]?\s+(.+)$", lowered)
+        if match:
+            return True, match.group(1).strip()
     return False, ""
 
 

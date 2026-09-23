@@ -31,6 +31,7 @@ class SmartMemory:
             "user_name": "",
             "default_city": "",
             "favorites": {"music": "", "app": "", "website": ""},
+            "preferences": {},
             "aliases": {},          # nickname -> canonical ("mom" -> contact)
             "corrections": {},      # misheard -> intended ("oprn youtube" -> "open youtube")
             "history": [],          # [{cmd, reply_ok, ts}]
@@ -82,6 +83,39 @@ class SmartMemory:
             return (self.data.get("favorites", {}).get(key) or "").strip()
         except Exception:
             return ""
+
+    def set_preference(self, key: str, value: str):
+        key = re.sub(r"[^a-z0-9 _-]+", "", (key or "").lower()).strip()
+        value = str(value or "").strip()[:300]
+        if not key or not value:
+            return False
+        preferences = self.data.setdefault("preferences", {})
+        preferences[key] = value
+        self.save()
+        return True
+
+    def get_preference(self, key: str) -> str:
+        try:
+            return (self.data.get("preferences", {}).get(
+                (key or "").lower().strip(), ""
+            ) or "").strip()
+        except Exception:
+            return ""
+
+    def preferences(self) -> dict:
+        try:
+            return dict(self.data.get("preferences", {}) or {})
+        except Exception:
+            return {}
+
+    def forget_preference(self, key: str) -> bool:
+        key = (key or "").lower().strip()
+        preferences = self.data.setdefault("preferences", {})
+        if key not in preferences:
+            return False
+        preferences.pop(key, None)
+        self.save()
+        return True
 
     def add_alias(self, nick: str, canonical: str):
         nick = (nick or "").lower().strip()

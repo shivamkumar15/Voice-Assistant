@@ -92,7 +92,9 @@ def _system_prompt() -> str:
         f"Current time: {now}. "
         "You control the user's desktop through tools: open apps/websites, play YouTube, "
         "web search, WhatsApp messages, volume/brightness, screenshots, system status, "
-        "time/weather/jokes, timers, windows, typing and media keys. "
+        "time/weather/jokes, timers, windows, typing and media keys. You can also "
+        "route explicit local workflows through the advanced_task tool for safe "
+        "file, document, study-plan, Git, notification, screen, form, and code actions. "
         "Rules: when the user asks to DO something, call the matching tool instead of "
         "describing it. Never claim an action succeeded without a tool result. "
         "For questions, answer in one or two short spoken-style sentences. "
@@ -289,6 +291,18 @@ def _tool_defs() -> list:
                     "type": "object",
                     "properties": {"action": {"type": "string", "enum": ["playpause", "next", "previous"]}},
                     "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "advanced_task",
+                "description": "Run an explicit local workflow such as finding a document, summarizing it, creating a study plan, managing files, Git, notifications, forms, or bounded code.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"request": {"type": "string"}},
+                    "required": ["request"],
                 },
             },
         },
@@ -675,6 +689,18 @@ class SparkBrain:
                 if action not in ("playpause", "next", "previous"):
                     action = "playpause"
                 _, reply = system_ctl.media_key(action)
+                return reply
+            if name == "advanced_task":
+                from .advanced import get_advanced
+
+                request = str(args.get("request") or "").strip()
+                task = get_advanced().prepare(request)
+                if task is None:
+                    return "I couldn't map that to a safe local action"
+                if task.pending is not None:
+                    get_advanced().pending = task.pending
+                    return task.pending.prompt
+                _, reply = get_advanced().execute(task)
                 return reply
             return f"Unknown tool {name}"
         except Exception as exc:

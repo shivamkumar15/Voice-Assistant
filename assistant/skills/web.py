@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 
 import requests
 
@@ -228,6 +228,16 @@ def google_search(query: str):
     return False, "Search failed: no browser available"
 
 
+def steam_search(query: str):
+    query = (query or "").strip()
+    if not query:
+        return False, "Which game should I open?"
+    url = f"https://store.steampowered.com/search/?term={quote_plus(query)}"
+    if not _launch_url(url):
+        return False, "I couldn't open Steam"
+    return True, f"Searching Steam for {query}"
+
+
 def youtube_search(query: str, autoplay: bool = True):
     """Play/search something on YouTube.
 
@@ -292,6 +302,22 @@ def play_query(query: str):
             return True, "Already playing"
         return youtube_search("top hits mix")
     return youtube_search((query or "").strip())
+
+
+def email_draft(recipient: str, message: str, subject: str = ""):
+    """Open a connected email client with a prefilled draft for review."""
+    recipient = (recipient or "").strip()
+    message = (message or "").strip()
+    if not recipient or not message:
+        return False, "Tell me who to email and what to say"
+    url = (
+        f"mailto:{quote(recipient)}"
+        f"?subject={quote_plus(subject.strip())}"
+        f"&body={quote_plus(message)}"
+    )
+    if not _launch_url(url):
+        return False, "I couldn't open an email client"
+    return True, f"Opened an email draft to {recipient}; review it and press send"
 
 
 def whatsapp_send(person: str, message: str):

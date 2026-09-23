@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 
 from . import background
+from .advanced import get_advanced
 from .config import OPENROUTER_API_KEY
 from .memory import get_memory
 from .needle_brain import NeedleBrain
@@ -20,6 +21,8 @@ from .skills import apps, info, input_control, reminders, system_ctl, web, windo
 class Brain:
     def __init__(self):
         self.pending_confirm = None  # "shutdown" | "restart" | "logout"
+        self.pending_advanced = None
+        self.advanced = get_advanced()
         self.needle = NeedleBrain()  # stays unavailable when disabled
         self._job_listener = None
         try:
@@ -76,6 +79,51 @@ class Brain:
             f"Say 'check job {job_id}' for the result."
         )
 
+    def _resolve_pending_advanced(self, text: str) -> str | None:
+        if self.pending_advanced is None:
+            self.pending_advanced = self.advanced.pending
+        action = self.pending_advanced
+        if action is None:
+            return None
+        command = re.sub(r"[.!?]+$", "", (text or "").lower().strip())
+        if re.search(r"\b(yes|yeah|yep|sure|do it|confirm|go ahead)\b", command):
+            self.pending_advanced = None
+            self.advanced.pending = None
+            _, reply = self.advanced.execute_pending(action)
+            return reply
+        if re.search(r"\b(no|nope|cancel|stop|don'?t|never ?mind)\b", command):
+            self.pending_advanced = None
+            self.advanced.pending = None
+            return "Cancelled."
+        self.pending_advanced = None
+        self.advanced.pending = None
+        return None
+
+    def _dispatch_advanced(self, text: str, strict: bool = False) -> str | None:
+        if not self.advanced.is_advanced(text):
+            return None
+        if strict:
+            return ""
+        try:
+            task = self.advanced.prepare(text)
+        except Exception as exc:
+            return f"I couldn't prepare that local task: {exc}"
+        if task is None:
+            return None
+        if task.pending is not None:
+            self.pending_advanced = task.pending
+            self.advanced.pending = task.pending
+            return task.pending.prompt
+        if any(kind == "monitor" for kind, _ in task.steps):
+            label = f"monitor system ({len(task.steps)} step task)"
+            job_id = background.submit(label, self.advanced.execute, task)
+            return f"Monitoring system resources as job #{job_id}. Say 'check job {job_id}' for the report."
+        try:
+            _, reply = self.advanced.execute(task)
+        except Exception as exc:
+            return f"That local task failed: {exc}"
+        return reply
+
     def _handle_job_commands(self, command: str):
         """Background job management; returns reply or None when no match."""
         c = command.strip()
@@ -122,6 +170,19 @@ class Brain:
         # routing so the command still lands.
         command = re.sub(r"\bwork\s+space\b", "workspace", command)
         command = re.sub(r"\bworks\s+box\b", "workspace", command)
+        if self.pending_advanced is not None or self.advanced.pending is not None:
+            resolved = self._resolve_pending_advanced(command)
+            if resolved is not None:
+                return resolved
+        if self.advanced.is_advanced(command) and not self.pending_confirm:
+            if strict:
+                return ""
+            clean_command, want_bg = background.strip_background_marker(text)
+            if want_bg and clean_command.strip():
+                return self._dispatch_background(clean_command)
+            advanced_reply = self._dispatch_advanced(command)
+            if advanced_reply is not None:
+                return advanced_reply
 
         # --- Background jobs (management + "X in background") -------------
         # Skip when this call already IS the background execution.
@@ -261,6 +322,10 @@ class Brain:
         m = re.match(r"^play\s+(.+)$", command)
         if m:
             _, reply = web.play_query(m.group(1).strip())
+            return reply
+
+        if re.fullmatch(r"(?:use|open) (?:the )?browser", command):
+            _, reply = apps.launch_app("browser")
             return reply
 
         m = re.match(r"^(?:open|go\s+to|launch|visit|start)\s+(.+?)$", command)
@@ -631,6 +696,10 @@ class Brain:
         text = (text or "").strip()
         if not text:
             return False, ""
+        if self.pending_advanced is not None or self.advanced.pending is not None:
+            resolved = self._resolve_pending_advanced(text)
+            if resolved is not None:
+                return True, resolved
         strict = from_voice and not addressed
         # --- smart layer: setters, briefing, memory, fuzzy -----------------
         try:
@@ -660,8 +729,24 @@ class Brain:
                     return True, mem_reply
         except Exception:
             pass
+        if self.pending_advanced is not None or self.advanced.pending is not None:
+            resolved = self._resolve_pending_advanced(text)
+            if resolved is not None:
+                return True, resolved
         if self.pending_confirm:
             return True, self._handle_and_remember(text)
+        if self.advanced.is_advanced(text):
+            if strict:
+                return False, ""
+            clean_advanced, want_bg = background.strip_background_marker(text)
+            if want_bg and clean_advanced.strip():
+                reply = self._dispatch_background(clean_advanced)
+                self._remember(text, reply, ok=True)
+                return True, reply
+            advanced_reply = self._dispatch_advanced(text)
+            if advanced_reply is not None:
+                self._remember(text, advanced_reply, ok=True)
+                return True, advanced_reply
         # Whole chain asked in background: "A and B in background".
         clean_all, want_bg_all = background.strip_background_marker(text)
         if want_bg_all and clean_all:
@@ -737,25 +822,50 @@ class Brain:
             fav = mem.favorite("music")
             if fav:
                 bits.append(f"favorite music is {fav}")
+            preferences = mem.preferences()
+            if preferences:
+                pref_text = "; ".join(
+                    f"{key}: {value}" for key, value in list(preferences.items())[:4]
+                )
+                bits.append(f"your preferences are {pref_text}")
             if not bits:
                 return "I don't remember anything about you yet. Say 'my name is ...' or 'my city is ...'."
             return "I remember " + ", ".join(bits) + "."
         m = re.match(r"^remember that (.+)$", low, re.IGNORECASE)
         if m:
             fact = m.group(1).strip()
-            # "remember that my favorite music is X"
             m2 = re.match(r"my (favourite|favorite) (music|song) is (.+)", fact, re.IGNORECASE)
             if m2:
                 mem.set("music", m2.group(3).strip())
                 return f"Got it — your favorite music is {m2.group(3).strip()}."
+            m3 = re.match(r"(?:i\s+)?prefer\s+(?:that\s+)?(.+)$", fact, re.IGNORECASE)
+            if m3:
+                mem.set_preference("preference", m3.group(1).strip())
+                return f"Got it — I'll remember that you prefer {m3.group(1).strip()}."
+            m3 = re.match(r"my\s+([a-z][a-z _-]{1,30})\s+is\s+(.+)$", fact, re.IGNORECASE)
+            if m3:
+                mem.set_preference(m3.group(1).strip(), m3.group(2).strip())
+                return f"Got it — I'll remember your {m3.group(1).strip()} as {m3.group(2).strip()}."
             return f"I'll remember that: {fact}."
+        m = re.match(r"^(?:i\s+)?prefer\s+(?:that\s+)?(.+)$", c, re.IGNORECASE)
+        if m:
+            mem.set_preference("preference", m.group(1).strip())
+            return f"Got it — I'll remember that you prefer {m.group(1).strip()}."
+        m = re.match(r"^forget (?:my\s+)?preference(?:\s+(?:about|for|that)\s+(.+))?$", low)
+        if m:
+            if m.group(1):
+                key = m.group(1).strip()
+                removed = mem.forget_preference(key) or mem.forget_preference("preference")
+                return f"Forgot that preference." if removed else "I didn't find that preference."
+            mem.forget_preference("preference")
+            return "Forgot your saved preference."
         m = re.match(r"^forget (everything|all|my name|my city|my music)$", low)
         if m:
             what = m.group(1)
             if what in ("everything", "all"):
                 mem.data.update({"user_name": "", "default_city": "",
                                  "favorites": {"music": "", "app": "", "website": ""},
-                                 "aliases": {}, "corrections": {}})
+                                 "preferences": {}, "aliases": {}, "corrections": {}})
                 mem.save()
                 return "Forgot everything I knew about you."
             if "name" in what:
@@ -813,6 +923,8 @@ class Brain:
     def _split_chain(self, text: str):
         """Split into command steps, or [text] when splitting is unsafe."""
         lowered = text.lower().strip()
+        if self.advanced.is_advanced(text):
+            return [text]
         # Never split typed/dictated content — "and" may be literal text.
         if re.match(r"^(type|write)\s+.+$", lowered):
             return [text]
@@ -849,7 +961,9 @@ class Brain:
         c = re.sub(r"\bworks\s+box\b", "workspace", c)
         if not c:
             return False
-        if self.pending_confirm:
+        if self.pending_confirm or self.pending_advanced:
+            return True
+        if self.advanced.is_advanced(c):
             return True
         # Background + job control are always commands.
         try:
@@ -875,7 +989,8 @@ class Brain:
             r"who am i|my preferences|forget (everything|all|my name|my city|my music)|"
             r"my name is .+|call me .+|my city is .+|remember( that)? .+|"
             r"turn it (up|down)|louder|quieter|brighter|dimmer|(do|play) (that|it) again|"
-            r"again|repeat( that)?|one more time)", c.strip(" .!?")):
+            r"again|repeat( that)?|one more time|i prefer .+|forget (my )?preference.*)",
+            c.strip(" .!?")):
             return True
         try:
             from .spark import spark_available
@@ -913,6 +1028,8 @@ class Brain:
         if re.match(r"^skip( (this|the)? ?(song|track|video))?$", c):
             return True
         if re.match(r"^play\s+(.+)$", c):
+            return True
+        if re.match(r"^(?:use|open) (?:the )?browser", c):
             return True
         m = re.match(r"^(?:open|go\s+to|launch|visit|start)\s+(.+?)$", c)
         if m and c != "start music":

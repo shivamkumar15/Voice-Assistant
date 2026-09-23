@@ -135,6 +135,11 @@ def run_text_mode():
             break
         if not line:
             continue
+        addressed, command = strip_wake_word(line)
+        if addressed:
+            line = command
+        if not line:
+            continue
         if re.sub(r"[.!?]+$", "", line.lower().strip()) in EXIT_PHRASES:
             break
         _, reply = brain.handle_chain(line)

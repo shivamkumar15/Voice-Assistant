@@ -31,9 +31,11 @@ _load_dotenv()
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Ninja")
 
 
-WAKE_WORDS = [w.lower() for w in os.getenv(
-    "WAKE_WORDS", "ninja"
-).split(",")]
+WAKE_WORDS = [
+    word.strip().lower()
+    for word in os.getenv("WAKE_WORDS", "ninja").split(",")
+    if word.strip()
+] or ["ninja"]
 
 # Note: "shut down" is deliberately NOT an exit phrase — it routes to the
 # brain's power commands (which ask for confirmation) instead of quitting.
@@ -152,3 +154,16 @@ NEEDLE_CHATTER_CONFIDENCE = float(os.getenv("NEEDLE_CHATTER_CONFIDENCE", "0.8"))
 NEEDLE_WEIGHTS = os.getenv("NEEDLE_WEIGHTS", "")
 
 WEATHER_CITY_DEFAULT = os.getenv("WEATHER_CITY", "")
+
+ASSISTANT_FILE_ROOTS = [
+    Path(os.path.expandvars(value.strip())).expanduser()
+    for value in os.getenv("ASSISTANT_FILE_ROOTS", str(Path.home())).split(os.pathsep)
+    if value.strip()
+]
+FILE_SEARCH_MAX_DEPTH = max(1, int(os.getenv("FILE_SEARCH_MAX_DEPTH", "5")))
+FILE_MAX_READ_BYTES = max(1024, int(os.getenv("FILE_MAX_READ_BYTES", "2000000")))
+CODE_TIMEOUT = max(1, int(os.getenv("CODE_TIMEOUT", "15")))
+CODE_MAX_OUTPUT = max(256, int(os.getenv("CODE_MAX_OUTPUT", "4000")))
+ALLOW_PACKAGE_INSTALL = os.getenv("ALLOW_PACKAGE_INSTALL", "0").lower() in (
+    "1", "true", "yes", "on",
+)
