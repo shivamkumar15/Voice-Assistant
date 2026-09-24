@@ -53,8 +53,7 @@ button:disabled { color: #6e7681; }
 .hud-red { color: #f85149; }
 .hud-amber { color: #d29922; }
 .hud-big { font-size: 24px; color: #ffffff; }
-.online-pill { background-color: rgba(63,185,80,0.12); border: 1px solid #3fb950;
-               border-radius: 11px; color: #3fb950; padding: 2px 10px; font-size: 10px; }
+
 .bubble-user { background: rgba(210,153,34,0.07); border: 1px solid #4a3f1e; border-radius: 8px; }
 .bubble-ninja { background: rgba(56,139,253,0.08); border: 1px solid #2a4a6b; border-radius: 8px; }
 .chip { background-color: #21262d; border: 1px solid #30363d; border-radius: 13px;

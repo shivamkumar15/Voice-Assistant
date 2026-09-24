@@ -1,6 +1,6 @@
 # Voice Assistant / Ninja
 
-A Linux desktop voice assistant that listens for commands, opens apps, controls the desktop, browses the web, and speaks responses back to you.
+A terminalo based voice assistant that listens for commands, opens apps, controls the desktop, browses the web, and speaks responses back to you.
 
 This project is centered around `ninja.py`, which runs the assistant in GUI, terminal, or text mode. The logic is split into a lightweight command router and skill modules for browser, desktop, system, and input automation.
 
@@ -20,49 +20,6 @@ This project is centered around `ninja.py`, which runs the assistant in GUI, ter
 - Persistent preferences, aliases, and multi-step command memory
 - Optional AI fallback for more natural language requests
 - GTK-based HUD for desktop interaction
-
-## Project Structure
-
-```text
-.
-├── ninja.py                 # Main entry point
-├── jarvis.py                # Compatibility alias
-├── alexa.py                 # Compatibility alias
-├── README.md                # Project documentation
-├── requirements.txt         # Python dependencies
-├── assistant/
-│   ├── __init__.py
-│   ├── brain.py             # Command routing and intent handling
-│   ├── advanced.py          # Safe multi-step local workflows
-│   ├── config.py            # Configuration and environment variables
-│   ├── ear.py               # Microphone and speech input handling
-│   ├── gui.py               # Desktop HUD interface
-│   ├── mouth.py             # Text-to-speech support
-│   ├── memory.py            # Memory helpers
-│   ├── needle_brain.py      # Optional natural-language brain
-│   ├── spark.py             # AI fallback integration
-│   ├── worker.py            # Voice/task loop
-│   ├── background.py        # Background job handling
-│   └── skills/
-│       ├── apps.py
-│       ├── browser_forms.py
-│       ├── code.py
-│       ├── files.py
-│       ├── git.py
-│       ├── hypr.py
-│       ├── info.py
-│       ├── input_control.py
-│       ├── monitor.py
-│       ├── notifications.py
-│       ├── screen.py
-│       ├── software.py
-│       ├── reminders.py
-│       ├── system_ctl.py
-│       ├── web.py
-│       └── windows.py
-├── honey-rs/                # Legacy Rust prototype archive
-└── .venv/                   # Local virtual environment (if created)
-```
 
 ## Requirements
 
@@ -112,7 +69,6 @@ export ASSISTANT_FILE_ROOTS="$HOME"
 export FILE_SEARCH_MAX_DEPTH="5"
 export ALLOW_PACKAGE_INSTALL="0"
 export SPARK_PROVIDER="auto"
-export OPENROUTER_API_KEY="your-key"
 ```
 
 You can also place these values into a `.env` file in the project root. `WAKE_WORDS` accepts a comma-separated list; the spoken greeting `Hey Ninja` is recognized automatically.
@@ -131,11 +87,6 @@ Only respond after hearing the wake word:
 python ninja.py --wake-word
 ```
 
-Launch without the microphone:
-
-```bash
-python ninja.py --no-mic
-```
 
 Run voice mode without the GUI:
 
@@ -149,13 +100,6 @@ Terminal text mode:
 python ninja.py --text
 ```
 
-There are also compatibility aliases:
-
-```bash
-python jarvis.py
-python alexa.py
-```
-
 ## Example Commands
 
 - "open youtube and play believer"
@@ -164,9 +108,9 @@ python alexa.py
 - "take a screenshot"
 - "search google for python tutorials"
 - "focus vscode"
-- "move mouse to the center"
+- "got this navbar and to about us page"
 - "set a timer for 10 minutes"
-- "what is the weather in Mumbai"
+- "what is the weather in Haryana"
 - "lock screen"
 - "shutdown the computer"
 - "open my CS folder, find the latest PDF, summarize it and create a study plan"

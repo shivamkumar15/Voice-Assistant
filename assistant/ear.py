@@ -28,10 +28,7 @@ import time
 
 from .config import MIC_DEVICE_INDEX, PHRASE_TIME_LIMIT, STT_LANGUAGE
 
-# Words the assistant can act on. When Google returns several guesses for
-# one utterance, the guess containing one of these wins over the top
-# hypothesis — e.g. "go to box 2" loses to "go to workspace 2", so a
-# mangled keyword doesn't eat the whole command.
+
 _COMMAND_KEYWORDS = (
     "workspace", "volume", "brightness", "screenshot", "youtube", "whatsapp",
     "telegram", "terminal", "vscode", "chrome", "firefox", "timer", "reminder",

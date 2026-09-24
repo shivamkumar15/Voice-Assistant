@@ -344,7 +344,6 @@ class SparkBrain:
         else:
             print(f"[spark] ready via {resolve_provider()}")
 
-    # -- public API ------------------------------------------------------
 
     def handle(self, text: str) -> tuple[bool, str]:
         """Try Spark; (False, '') when unavailable/error so callers fall back."""
@@ -380,7 +379,6 @@ class SparkBrain:
                     return True, reply
                 if reply:
                     last_error = reply
-                # else: silent refusal — try the next backend
                 continue
             except Exception as exc:
                 last_error = str(exc) or repr(exc)
@@ -390,7 +388,6 @@ class SparkBrain:
             return False, last_error
         return False, ""
 
-    # -- OpenCode free tier (CLI backend) ----------------------------------
 
     def _opencode_message(self, prompt: str) -> str:
         """Prompt with bounded conversation context + no-tools instruction."""
