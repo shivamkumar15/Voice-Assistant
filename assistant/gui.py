@@ -182,8 +182,6 @@ class ChatWindow:
         threading.Thread(target=self._init_levels, daemon=True).start()
         self._term_append(_console_header())
 
-    # ---------- css / window skeleton ----------
-
     def _build_css(self):
         display = Gdk.Display.get_default()
         if display is None:
