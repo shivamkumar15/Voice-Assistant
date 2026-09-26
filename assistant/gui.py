@@ -1185,11 +1185,24 @@ class ChatWindow:
 
     def _speak_text(self, text: str):
         def _do():
+            from . import ear, mouth
+            mic = ear.get_ear()
+            # Pause the ear so speaking from the HUD does not get transcribed
+            # as a fresh command.
             try:
-                from . import mouth
+                mic.pause()
+            except Exception:
+                mic = None
+            try:
                 mouth.speak(text or "")
             except Exception:
                 pass
+            finally:
+                if mic is not None:
+                    try:
+                        mic.resume()
+                    except Exception:
+                        pass
         threading.Thread(target=_do, daemon=True).start()
 
     # ----- jobs & timers -----

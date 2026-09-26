@@ -6,6 +6,12 @@ Phrases are gated on a median-based noise floor rather than the stock
 SpeechRecognition dynamic threshold: laptop mics produce short loud bursts
 (fan spin-up, EMI) that the stock threshold chases upward, leaving the
 assistant deaf. A median floor over recent history ignores bursts.
+
+Transcription itself is pluggable. The default runs OpenAI Whisper locally via
+faster-whisper (STT_PROVIDER=auto): it is fully offline, needs no API key, and
+beats the keyless Google endpoint on accents and jargon. Google Web Speech
+stays wired in as a fallback so a missing package or a failed model load
+degrades to "still listens" rather than "no mic".
 """
 
 try:
@@ -15,18 +21,31 @@ except ModuleNotFoundError:
 
 import collections
 import contextlib
+import io
 import math
 import os
 import queue
 import re
 import statistics
+import wave
 from array import array
 import subprocess
 import sys
 import threading
 import time
 
-from .config import MIC_DEVICE_INDEX, PHRASE_TIME_LIMIT, STT_LANGUAGE
+from .config import (
+    MIC_DEVICE_INDEX,
+    PHRASE_TIME_LIMIT,
+    STT_LANGUAGE,
+    STT_PROVIDER,
+    STT_WHISPER_BEAMS,
+    STT_WHISPER_COMPUTE_TYPE,
+    STT_WHISPER_DEVICE,
+    STT_WHISPER_HOTWORDS,
+    STT_WHISPER_MODEL,
+    STT_WHISPER_MODEL_DIR,
+)
 
 
 _COMMAND_KEYWORDS = (
@@ -84,6 +103,220 @@ def _pick_transcript(result) -> str:
         if any(k in lowered for k in _COMMAND_KEYWORDS):
             return text
     return texts[0]
+
+
+# --- Speech-to-text provider ------------------------------------------------
+
+_whisper_importable = None
+
+
+def whisper_available() -> bool:
+    """True when the faster-whisper package is importable."""
+    global _whisper_importable
+    if _whisper_importable is None:
+        try:
+            import faster_whisper  # noqa: F401
+            _whisper_importable = True
+        except ImportError:
+            _whisper_importable = False
+    return _whisper_importable
+
+
+def resolve_stt_provider() -> str:
+    """'whisper' or 'google' per STT_PROVIDER (auto prefers local Whisper)."""
+    want = (STT_PROVIDER or "auto").strip().lower()
+    if want == "whisper":
+        return "whisper"
+    if want == "google":
+        return "google"
+    return "whisper" if whisper_available() else "google"
+
+
+def _whisper_language():
+    """Our BCP-47 STT_LANGUAGE ('en-US') as Whisper's ISO-639-1 ('en').
+
+    None lets Whisper detect the language itself.
+    """
+    code = (STT_LANGUAGE or "en").strip().lower()
+    if not code or code == "auto":
+        return None
+    return code.split("-", 1)[0].strip() or "en"
+
+
+def _wav_bytes(frames, rate: int, width: int) -> bytes:
+    """Wrap captured PCM chunks in a WAV header, entirely in memory.
+
+    Feeding Whisper a WAV (rather than a raw array) lets faster-whisper do the
+    48kHz -> 16kHz resample with PyAV's proper polyphase filter, instead of the
+    naive decimation that turns chipmunk speech into garbage.
+    """
+    return _wrap_wav(b"".join(frames), rate, width)
+
+
+def _wrap_wav(payload: bytes, rate: int, width: int) -> bytes:
+    """Put a WAV header in front of raw PCM, in memory (no temp file)."""
+    if width not in (1, 2, 4):
+        raise ValueError(f"unsupported sample width: {width}")
+    if width != 2:
+        # sr.Microphone can be configured for 1- or 4-byte samples, and
+        # decode_audio only takes the WAV container. Convert rather than let
+        # it fail deep inside PyAV, where the message would be unhelpful.
+        # "B" not "b": 8-bit WAV samples are unsigned, centred on 128.
+        samples = array({1: "B", 4: "i"}[width])
+        samples.frombytes(payload[:len(payload) - len(payload) % width])
+        if width == 1:  # unsigned 8-bit is centred on 128, not 0
+            values = [min(32767, max(-32768, (value - 128) * 256))
+                      for value in samples]
+        else:
+            values = [value >> 16 for value in samples]
+        payload = array("h", values).tobytes()
+        width = 2
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(width)
+        out.setframerate(rate)
+        out.writeframes(payload)
+    return buffer.getvalue()
+
+
+def _probe_tone_wav(rate: int = 16000, seconds: float = 0.4) -> bytes:
+    """A short 440Hz tone, used to prove a device can actually run Whisper.
+
+    Deliberately not silence: with vad_filter on, a silent clip is dropped
+    before the encoder is ever touched, so probing with it would happily pass
+    on a device that cannot run anything.
+    """
+    import numpy as np
+
+    t = np.arange(int(rate * seconds), dtype=np.float32) / rate
+    tone = (0.3 * np.sin(2 * np.pi * 440 * t) * 32767).astype("<i2")
+    return _wrap_wav(tone.tobytes(), rate, 2)
+
+
+def _cuda_present() -> bool:
+    """True when a CUDA device is visible at all (not yet proven usable)."""
+    try:
+        import ctranslate2
+        return ctranslate2.get_cuda_device_count() >= 1
+    except Exception:
+        return False
+
+
+class WhisperEngine:
+    """Local speech-to-text with OpenAI Whisper (via faster-whisper).
+
+    Fully offline: the model is fetched from Hugging Face on first use, cached
+    under STT_WHISPER_MODEL_DIR, then held in memory for the session. The
+    engine is only ever touched from the single listen thread, so the model
+    handle needs no locking.
+    """
+
+    def __init__(self, model=None, device=None, compute_type=None):
+        self.model_name = model or STT_WHISPER_MODEL
+        self.requested_device = (device or STT_WHISPER_DEVICE or "auto").lower()
+        self.requested_compute = (compute_type or STT_WHISPER_COMPUTE_TYPE
+                                  or "auto").lower()
+        self._model = None
+        self.device = None
+
+    def _build(self, device: str, compute_type: str):
+        """Load the model on *device* and prove it can run an encode.
+
+        The smoke test is not paranoia. CTranslate2 happily reports a CUDA
+        device and accepts the model, then fails on the *first inference* when
+        cuBLAS/cuDNN are missing (a bare driver install with no
+        nvidia-cublas-cu12). Probing with real audio is the only way to know
+        before the user's first spoken phrase dies on a raw RuntimeError.
+        """
+        from faster_whisper import WhisperModel
+
+        model = WhisperModel(
+            self.model_name,
+            device=device,
+            compute_type=compute_type,
+            download_root=str(STT_WHISPER_MODEL_DIR),
+        )
+        segments, _info = model.transcribe(
+            io.BytesIO(_probe_tone_wav()), language="en", beam_size=1,
+            without_timestamps=True,
+        )
+        list(segments)  # the generator is lazy: this is what runs the encoder
+        return model
+
+    def load(self):
+        """Build the model, downloading it on first run. Idempotent."""
+        if self._model is not None:
+            return self._model
+
+        started = time.monotonic()
+        attempts = []
+        if self.requested_device == "auto":
+            if _cuda_present():
+                attempts.append(("cuda", "float16"))
+            # int8 on CPU is roughly twice the speed of float32 for a loss you
+            # cannot hear on short commands.
+            attempts.append(("cpu", "int8"))
+        else:
+            compute = self.requested_compute
+            if compute == "auto":
+                compute = "float16" if self.requested_device == "cuda" else "int8"
+            attempts.append((self.requested_device, compute))
+
+        errors = []
+        for device, compute in attempts:
+            try:
+                self._model = self._build(device, compute)
+            except Exception as exc:
+                errors.append(f"{device}: {exc}")
+                print(f"[ear] whisper unusable on {device} ({exc})")
+                continue
+            self.device = device
+            print(f"[ear] whisper ready — {self.model_name} on "
+                  f"{device}/{compute} ({time.monotonic() - started:.1f}s, "
+                  "local speech-to-text)")
+            return self._model
+
+        self._model = None
+        raise RuntimeError(f"could not load whisper model "
+                           f"'{self.model_name}' ({'; '.join(errors)})")
+
+    def transcribe(self, wav: bytes) -> str:
+        """Transcribe a mono WAV blob to text. '' means nothing intelligible.
+
+        The knobs below are what make this usable as a live command recogniser
+        rather than a batch transcriber, and each one is a guard against a
+        specific Whisper failure that is normally invisible: silence becoming
+        words, or one word repeating until the time limit runs out.
+        """
+        model = self.load()
+        segments, _info = model.transcribe(
+            io.BytesIO(wav),
+            language=_whisper_language(),
+            beam_size=STT_WHISPER_BEAMS,
+            # Silero VAD inside Whisper trims the leading/trailing silence our
+            # own gate left in, and is the main defence against Whisper
+            # hallucinating a sentence out of a cough.
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 400},
+            # Whisper's classic failure mode is looping one phrase forever
+            # ("thank you. thank you. thank you."). Every phrase here is
+            # independent, so never carry text over from the previous one, and
+            # treat trailing silence as the end of the utterance.
+            condition_on_previous_text=False,
+            hallucination_silence_threshold=2,
+            # Prime the decoder with the assistant's vocabulary. This is what
+            # turns "works box" into "workspace" and "harry armor" into
+            # "haryana". Kept short on purpose: a long list biases the decoder
+            # toward saying those words at all, so a bigger model with the same
+            # list turned "what is the weather" into "whatsapp weather".
+            hotwords=STT_WHISPER_HOTWORDS.strip() or None,
+            without_timestamps=True,
+        )
+        # transcribe() is a lazy generator: iterating here (not at the call) is
+        # what actually runs inference, so exceptions surface inside the caller's
+        # try/except rather than at an unrelated point later.
+        return " ".join(segment.text.strip() for segment in segments).strip()
 
 
 @contextlib.contextmanager
@@ -154,6 +387,12 @@ class Ear:
         self.phrases = queue.Queue()
         self._started = False
         self._service_error_reported = False
+        self.provider = resolve_stt_provider()
+        self.whisper = WhisperEngine() if self.provider == "whisper" else None
+        # Serialises the single recogniser, and is held while the listener is
+        # paused so a phrase never records over the assistant's own voice.
+        self._stt_lock = threading.RLock()
+        self._paused = threading.Event()
         # Live intake meter for the HUD visualiser (updated per audio chunk).
         self.raw_level = 0
         self.audio_level = 0.0  # smoothed 0.0..1.0
@@ -198,6 +437,12 @@ class Ear:
         with _silence_c_stderr():
             source = microphone.__enter__()
 
+        # Warm the model up off-thread: the first load downloads and
+        # initialises weights, which would otherwise be charged to whichever
+        # phrase happens to arrive first.
+        if self.whisper is not None:
+            threading.Thread(target=self._warm_whisper, daemon=True).start()
+
         worker = threading.Thread(
             target=self._listen_loop,
             args=(self.recognizer, source),
@@ -205,7 +450,60 @@ class Ear:
         )
         worker.start()
         self._started = True
-        print("[ear] microphone ready")
+        print(f"[ear] microphone ready (speech-to-text: {self.provider})")
+
+    def pause(self):
+        """Stop accepting phrases until resume() (used while the assistant speaks).
+
+        Without this the microphone hears the reply through the speakers and
+        transcribes it, so the assistant talks to itself. Cheap and safe to
+        call from any thread; the resume costs one dropped phrase at worst.
+        """
+        self._paused.set()
+
+    def resume(self):
+        """Undo pause() and throw away anything captured while paused."""
+        if self._paused.is_set():
+            self._paused.clear()
+            self.drain()
+
+    def _warm_whisper(self):
+        """Load the model in the background; fall back to Google on failure."""
+        try:
+            self.whisper.load()
+        except Exception as exc:
+            print(f"[ear] whisper unavailable ({exc}) — using Google instead")
+            self.provider = "google"
+            self.whisper = None
+
+    def _transcribe_serialised(self, recognizer, frames, rate, width) -> str:
+        """Run _transcribe under a lock shared with self-pausing.
+
+        Local Whisper holds the GIL through a multi-hundred-millisecond C++
+        decode, which would otherwise stall the main worker thread between
+        phrases (frozen HUD, sluggish wake-word stripping).
+        """
+        with self._stt_lock:
+            return self._transcribe(recognizer, frames, rate, width)
+
+    def _transcribe(self, recognizer, frames, rate, width) -> str:
+        """Transcribe one captured phrase with the active provider.
+
+        Returns '' for silence or unintelligible audio. Whichever provider is
+        in use, an error here is reported once and then swallowed: a failed
+        phrase must never take the listener down.
+        """
+        import speech_recognition as sr
+
+        if self.provider == "whisper":
+            return self.whisper.transcribe(_wav_bytes(frames, rate, width))
+
+        # show_all=True returns every guess; _pick_transcript keeps the one
+        # that looks most like a real command.
+        audio = sr.AudioData(b"".join(frames), rate, width)
+        result = recognizer.recognize_google(
+            audio, language=STT_LANGUAGE, show_all=True)
+        return _pick_transcript(result)
 
     def _listen_loop(self, recognizer, source):
         import speech_recognition as sr
@@ -225,6 +523,9 @@ class Ear:
         last_gain_check = time.monotonic()
 
         while True:
+            if self._paused.is_set():
+                time.sleep(0.05)
+                continue
             # PipeWire keeps re-restoring the ALSA boost on stream events;
             # re-check periodically so the mic stays usable mid-session.
             if time.monotonic() - last_gain_check > 30:
@@ -269,13 +570,8 @@ class Ear:
             if len(frames) < min_speech_chunks:
                 continue  # a click or burst, not speech
 
-            audio = sr.AudioData(b"".join(frames), rate, width)
             try:
-                # show_all=True returns every guess; _pick_transcript keeps
-                # the one that looks most like a real command.
-                result = recognizer.recognize_google(
-                    audio, language=STT_LANGUAGE, show_all=True)
-                text = _pick_transcript(result)
+                text = self._transcribe_serialised(recognizer, frames, rate, width)
             except sr.UnknownValueError:
                 continue
             except sr.RequestError as exc:
@@ -284,7 +580,9 @@ class Ear:
                     self._service_error_reported = True
                 continue
             except Exception as exc:
-                print(f"[ear] recognition error: {exc}")
+                if not self._service_error_reported:
+                    print(f"[ear] {self.provider} recognition error: {exc}")
+                    self._service_error_reported = True
                 continue
             self._service_error_reported = False
             text = text.strip()

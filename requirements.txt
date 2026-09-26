@@ -1,8 +1,14 @@
 # Core voice stack
-SpeechRecognition>=3.10
+SpeechRecognition>=3.10   # mic capture + Google Web Speech fallback STT
 PyAudio>=0.2.13
 pyttsx3>=2.90
 piper-tts>=1.8          # neural TTS voice (espeak fallback still works without it)
+
+# Local speech-to-text: OpenAI Whisper via CTranslate2, fully offline.
+# Optional — without it ear.py falls back to the keyless Google endpoint.
+# `pip install faster-whisper` on Python 3.13+ may also need
+# nvidia-cublas-cu12 / nvidia-cudnn-cu12 to use a GPU; otherwise it runs on CPU.
+faster-whisper>=1.1
 
 # System control
 psutil>=5.9

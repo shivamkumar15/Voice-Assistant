@@ -63,11 +63,49 @@ PHRASE_TIME_LIMIT = 8
 LISTEN_TIMEOUT = 6
 FOLLOWUP_TIMEOUT = 12
 
-# Speech-to-text language for Google recognition (e.g. "en-US", "en-IN",
-# "en-PH"). If the assistant constantly mishears accented words, set this
-# to your English variant — it makes a big difference for words like
-# "workspace".
+# Speech-to-text language (e.g. "en-US", "en-IN", "en-PH"). If the assistant
+# constantly mishears accented words, set this to your English variant — it
+# makes a big difference for words like "workspace". Google uses the full
+# BCP-47 tag; Whisper only the "en" part, which ear.py derives from this.
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en-US")
+
+# --- Local Whisper (faster-whisper / CTranslate2) ---------------------------
+# OpenAI Whisper running fully on-device: no API key, no audio leaves the
+# machine, and it hears accents, jargon and "workspace"-style words far more
+# reliably than the keyless Google endpoint.
+# "auto" (default): Whisper when faster-whisper is installed, else Google.
+# "whisper": Whisper only. "google": Google Web Speech only.
+STT_PROVIDER = os.getenv("STT_PROVIDER", "auto").strip().lower()
+# Size name from faster-whisper: tiny.en / base.en / small.en / medium.en /
+# large-v3, or an absolute path to a downloaded model. base.en is the
+# accuracy/latency sweet spot; small.en is better on jargon, tiny.en is for
+# slow CPUs.
+STT_WHISPER_MODEL = os.getenv("STT_WHISPER_MODEL", "base.en")
+# "auto" uses CUDA when a usable GPU is present and falls back to CPU.
+STT_WHISPER_DEVICE = os.getenv("STT_WHISPER_DEVICE", "auto").strip().lower()
+# "auto" picks float16 on GPU and int8 on CPU (int8 roughly doubles CPU
+# speed for a barely noticeable accuracy loss on short commands).
+STT_WHISPER_COMPUTE_TYPE = os.getenv("STT_WHISPER_COMPUTE_TYPE", "auto").strip().lower()
+# Beam width. 1 is fastest, 5 (faster-whisper's default) is more accurate.
+STT_WHISPER_BEAMS = max(1, int(os.getenv("STT_WHISPER_BEAMS", "5")))
+# Vocabulary pre-priming: the words below are ones Whisper mangles in a
+# desktop-assistant context ("works box" -> "workspace"). Measured against
+# base.en this fixed "workspace", "vscode" and "haryana", all of which
+# base.en got wrong unprimed.
+# Keep it short. A long list biases the decoder toward saying those words at
+# all, which is how a primed list turns "what is the weather" into
+# "whatsapp weather" on a larger model.
+# Blank to disable. Comma separated, so quote it in .env.
+STT_WHISPER_HOTWORDS = os.getenv(
+    "STT_WHISPER_HOTWORDS",
+    "workspace, workspaces, vscode, bluetooth, brightness, screenshot, "
+    "clipboard, notifications, timer, haryana",
+)
+# Where the Whisper model is downloaded and cached (fetched on first run).
+STT_WHISPER_MODEL_DIR = Path(os.getenv(
+    "STT_WHISPER_MODEL_DIR",
+    str(Path.home() / ".cache" / "ninja-assistant" / "whisper"),
+))
 
 
 BROWSER_CANDIDATES = {

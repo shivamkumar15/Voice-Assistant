@@ -7,6 +7,7 @@ This project is centered around `ninja.py`, which runs the assistant in GUI, ter
 ## Features
 
 - Voice command processing with wake-word or continuous listening modes
+- Local offline speech recognition with OpenAI Whisper (`faster-whisper`), no API key
 - App launching and window management
 - Browser automation for web pages and searches
 - Mouse and keyboard control
@@ -40,6 +41,11 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+The first run downloads the Whisper model (~150MB for `base.en`) to
+`~/.cache/ninja-assistant/whisper`, then caches it for later runs. It is
+loaded in the background at startup, so the first phrase you speak is not
+delayed by it.
+
 If your system is missing desktop utilities, install them with your package manager.
 
 Example for Debian/Ubuntu:
@@ -72,6 +78,27 @@ export SPARK_PROVIDER="auto"
 ```
 
 You can also place these values into a `.env` file in the project root. `WAKE_WORDS` accepts a comma-separated list; the spoken greeting `Hey Ninja` is recognized automatically.
+
+### Speech recognition
+
+Voice input uses OpenAI Whisper running locally through `faster-whisper`
+(CTranslate2). Audio never leaves the machine, no API key is needed, and it
+handles accents and jargon better than a keyless cloud endpoint.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `STT_PROVIDER` | `auto` | `whisper` (local), `google` (cloud fallback), or `auto` to use Whisper when installed |
+| `STT_WHISPER_MODEL` | `base.en` | `tiny.en` / `base.en` / `small.en` / `medium.en` / `large-v3`, or a path to a downloaded model |
+| `STT_WHISPER_DEVICE` | `auto` | `auto` uses a GPU when one works, else CPU. Force `cpu` to skip the probe |
+| `STT_WHISPER_BEAMS` | `5` | Beam width. `1` is fastest, `5` is more accurate |
+| `STT_WHISPER_HOTWORDS` | assistant vocabulary | Words pre-primed into the decoder, which is what fixes "works box" → "workspace". Blank to disable |
+| `STT_LANGUAGE` | `en-US` | Accent hint, e.g. `en-IN` |
+
+Notes:
+
+- `base.en` is the default for a reason: on short commands it matched `small.en` while running about 3x faster, and the larger model occasionally spoke a primed hotword that was never said. Raise to `small.en` only if you use long or unusual vocabulary.
+- GPU use needs `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` on some setups. The startup line says which device it actually chose; if the GPU probe fails it silently falls back to CPU `int8`, which is still faster than real time for short commands.
+- If `faster-whisper` is not installed, or the model cannot be loaded, the assistant falls back to the keyless Google endpoint and says so in the terminal.
 
 ## Running the Assistant
 

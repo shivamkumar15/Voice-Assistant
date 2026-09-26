@@ -255,10 +255,27 @@ class AssistantWorker:
     def _speak(self, text: str):
         if not text:
             return
-        if self.tts_enabled:
-            mouth.speak(text)  # also echoes to the terminal
-        else:
-            print(f"{ASSISTANT_NAME}: {text}")
+        # Mute the ear while we talk, or the microphone transcribes the reply
+        # through the speakers and the assistant answers its own voice.
+        mic = self.mic
+        resume = False
+        if mic is not None and self.voice:
+            try:
+                mic.pause()
+                resume = True
+            except Exception:
+                resume = False
+        try:
+            if self.tts_enabled:
+                mouth.speak(text)  # also echoes to the terminal
+            else:
+                print(f"{ASSISTANT_NAME}: {text}")
+        finally:
+            if resume:
+                try:
+                    mic.resume()
+                except Exception:
+                    pass
 
     def _idle_state(self) -> str:
         listening = self.voice and self.mic_enabled and self.mic is not None

@@ -41,6 +41,27 @@ def run_gui(no_wake: bool, voice: bool):
         worker.stop()
 
 
+def _speak(mic, text: str):
+    """Speak, with the microphone paused so we do not transcribe our own reply.
+
+    The ear hears the speakers otherwise and the assistant ends up answering
+    itself; pausing for the duration of the reply is the fix.
+    """
+    if mic is not None:
+        try:
+            mic.pause()
+        except Exception:
+            mic = None
+    try:
+        mouth.speak(text)
+    finally:
+        if mic is not None:
+            try:
+                mic.resume()
+            except Exception:
+                pass
+
+
 def run_terminal(no_wake: bool):
     """Voice-only loop printing to the terminal (no window)."""
     brain = Brain()
@@ -65,7 +86,7 @@ def run_terminal(no_wake: bool):
             if no_wake:
                 addressed, remainder = strip_wake_word(heard)
                 if addressed and not remainder:
-                    mouth.speak("Yes?")
+                    _speak(mic, "Yes?")
                     follow_up = mic.next_phrase(timeout=FOLLOWUP_TIMEOUT)
                     if not follow_up:
                         continue
@@ -78,7 +99,7 @@ def run_terminal(no_wake: bool):
                     continue  # ignore chatter that isn't addressed to us
                 elif not remainder:
                     # Bare wake word -> short follow-up window.
-                    mouth.speak("Yes?")
+                    _speak(mic, "Yes?")
                     follow_up = mic.next_phrase(timeout=FOLLOWUP_TIMEOUT)
                     if not follow_up:
                         continue
@@ -93,11 +114,11 @@ def run_terminal(no_wake: bool):
 
             handled, reply = brain.handle_chain(command)
             if handled or addressed:
-                mouth.speak(reply)
+                _speak(mic, reply)
             else:
                 print(f"(heard, not a command: {command})")
 
-        mouth.speak("Goodbye!")
+        _speak(mic, "Goodbye!")
     except Exception as exc:
         print(f"[assistant] stopped: {exc}")
     finally:

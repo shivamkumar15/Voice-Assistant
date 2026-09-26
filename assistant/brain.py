@@ -165,9 +165,10 @@ class Brain:
         wake word — Needle then needs a higher confidence to act.
         """
         command = text.lower().strip()
-        # Speech-recognition repairs: Google often splits "workspace" into
-        # "work space" and clips it to "box"/"works" — normalise before
-        # routing so the command still lands.
+        # Speech-recognition repairs: engines routinely split "workspace" into
+        # "work space" and clip it to "box"/"works" — normalise before routing
+        # so the command still lands. (Whisper gets this wrong far less often,
+        # but these are cheap and still catch what slips through.)
         command = re.sub(r"\bwork\s+space\b", "workspace", command)
         command = re.sub(r"\bworks\s+box\b", "workspace", command)
         if self.pending_advanced is not None or self.advanced.pending is not None:
@@ -244,8 +245,8 @@ class Brain:
             return reply
 
         # --- Workspaces (must precede the generic open/go-to handler) ---
-        # "box" is accepted as "workspace": a clipped "workspace" is what
-        # Google STT most often returns ("go to box 2").
+        # "box" is accepted as "workspace": a clipped "workspace" is a common
+        # STT artefact ("go to box 2").
         m = re.match(r"^((?:go to|switch to|move to|jump to|open))\s+(?:the\s+|my\s+)?(.+)$", command)
         if m and ("workspace" in command or re.search(r"\bbox\b", command)):
             rest = re.sub(r"\bworkspaces?\b|\bbox\b", "", m.group(2)).strip()
