@@ -18,7 +18,7 @@ This project is centered around `ninja.py`, which runs the assistant in GUI, ter
 - Multi-step study workflows such as finding the latest PDF and creating a study plan
 - Git status/history/diff, confirmed commits and sync, and bounded code execution
 - Best-effort screen OCR, browser form filling, email drafts, and game search
-- Persistent preferences, aliases, and multi-step command memory
+- Persistent preferences, free-form memory, aliases, and multi-step command memory
 - Optional AI fallback for more natural language requests
 - GTK-based HUD for desktop interaction
 
@@ -149,6 +149,18 @@ python ninja.py --text
 - "what's on my screen"
 - "fill the form with name Aamina and email aamina@example.com"
 
+### Memory
+
+Anything you tell it to remember is kept in `~/.local/share/ninja-assistant/memory.json`, and read back on demand:
+
+- "remember that I am afraid of heights" — free-form facts are stored as said
+- "what do you remember about heights" — targeted recall
+- "what do you remember" — everything it knows
+- "forget that I am afraid of heights" — remove one fact
+- "forget everything" — wipe the lot
+
+Facts it can put a name to are stored as preferences instead, so "remember that my dentist is Dr Rao" is recalled with its capitalisation intact. The file is plain JSON capped at 20KB (roughly 100 facts), and it lives in a directory the file skills refuse to read, so the assistant cannot read its own memory back to you through a path traversal.
+
 ## Notes
 
 - Commands are processed by a fast router in `assistant/brain.py` and can fall back to optional local or AI-based natural language systems.
@@ -157,6 +169,7 @@ python ninja.py --text
 - PDF extraction uses `pdftotext` when available and falls back to `pypdf` if installed. Screen reading uses `tesseract` when available.
 - Form filling is keyboard-based and expects the browser form to already be focused; review the form before submitting.
 - The project is designed primarily for Linux desktop use, with Hyprland/Wayland support and X11 fallbacks.
+- Memory is stored in plain JSON, unencrypted, and is only protected from the assistant's own file tools. Anyone with access to your home directory can read it. The same is true of `assistant/.env`, which holds API keys in plain text.
 - The `honey-rs` directory contains an older Rust prototype and is not the main runtime path.
 
 ## Development Notes

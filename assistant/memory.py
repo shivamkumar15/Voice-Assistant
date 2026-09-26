@@ -4,6 +4,7 @@ Stores user preferences, aliases, command history and learned corrections
 in a small JSON file so the assistant gets smarter over time:
 
 - remembers your name, default city, favourite music, volume defaults
+- keeps free-form facts that don't fit a preference ("I'm afraid of heights")
 - learns contact/app nicknames ("mom" -> WhatsApp contact, "vscode" -> "code")
 - keeps last ~50 commands for context resolution ("turn it up", "again")
 - tracks usage counts for proactive suggestions ("you often check weather...")
@@ -32,6 +33,7 @@ class SmartMemory:
             "default_city": "",
             "favorites": {"music": "", "app": "", "website": ""},
             "preferences": {},
+            "facts": [],            # free-form facts that fit no preference slot
             "aliases": {},          # nickname -> canonical ("mom" -> contact)
             "corrections": {},      # misheard -> intended ("oprn youtube" -> "open youtube")
             "history": [],          # [{cmd, reply_ok, ts}]
@@ -116,6 +118,72 @@ class SmartMemory:
         preferences.pop(key, None)
         self.save()
         return True
+
+    # ---------- free-form facts ----------
+    # "remember that I am afraid of heights" is not a preference, not a name,
+    # not a city, and not a favourite anything. It used to be answered with
+    # "I'll remember that" and then thrown away, so the assistant lied. These
+    # store the sentence as said, and are what that reply now promises.
+    MAX_FACTS = 100
+
+    def _fact_list(self) -> list:
+        """The facts list, repaired if the stored shape is not a list.
+
+        memory.json is a hand-editable file, so a bad edit ("facts": "oops")
+        must not take remembering down with an AttributeError.
+        """
+        facts = self.data.get("facts")
+        if not isinstance(facts, list):
+            facts = []
+            self.data["facts"] = facts
+        return facts
+
+    def add_fact(self, fact: str) -> bool:
+        """Remember a free-form fact. True if it was new (not a duplicate)."""
+        fact = (fact or "").strip()[:300]
+        if not fact:
+            return False
+        facts = self._fact_list()
+        # Case-insensitive dedup, but keep the original spelling of the fact
+        # the user actually said ("Dr Rao", not "dr rao").
+        if any(str(existing).lower() == fact.lower() for existing in facts):
+            return False
+        facts.append(fact)
+        del facts[:-self.MAX_FACTS]
+        self.save()
+        return True
+
+    def facts(self) -> list:
+        try:
+            return [str(f).strip() for f in self._fact_list() if str(f or "").strip()]
+        except Exception:
+            return []
+
+    def find_facts(self, query: str) -> list:
+        """Facts containing any word of *query* (all words must match)."""
+        words = [w for w in re.findall(r"[a-z0-9']+", (query or "").lower()) if len(w) > 2]
+        if not words:
+            return []
+        hits = []
+        for fact in self.facts():
+            lowered = fact.lower()
+            if all(word in lowered for word in words):
+                hits.append(fact)
+        return hits
+
+    def forget_fact(self, query: str) -> int:
+        """Drop every fact matching *query*. Returns how many were removed."""
+        words = [w for w in re.findall(r"[a-z0-9']+", (query or "").lower()) if len(w) > 2]
+        if not words:
+            return 0
+        facts = self._fact_list()
+        kept = [f for f in facts
+                if not all(w in str(f).lower() for w in words)]
+        removed = len(facts) - len(kept)
+        if removed:
+            self.data["facts"] = kept
+            self.save()
+        return removed
 
     def add_alias(self, nick: str, canonical: str):
         nick = (nick or "").lower().strip()

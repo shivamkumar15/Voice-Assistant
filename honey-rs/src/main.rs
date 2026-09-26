@@ -4,6 +4,7 @@ mod command_parser;
 mod config;
 mod desktop_controller;
 mod emotion_engine;
+mod memory_vault;
 mod personality;
 mod time_service;
 mod voice_input;
@@ -13,6 +14,7 @@ mod weather_service;
 use anyhow::Result;
 use brain::{detect_sentiment, Brain};
 use command_parser::CommandParser;
+use memory_vault::MemoryVault;
 use personality::Personality;
 use voice_input::{Recorder, Transcriber};
 use voice_output::Speaker;
@@ -63,6 +65,12 @@ fn run() -> Result<()> {
 
     let mut personality = Personality::new();
     let mut parser = CommandParser::new(WeatherService::new(config::openweather_api_key()));
+    let mut vault = MemoryVault::open();
+    println!(
+        "\u{1F5C4}\u{FE0F} Memory vault: {} memor{}",
+        vault.count(),
+        if vault.count() == 1 { "y" } else { "ies" }
+    );
     let speaker = Speaker::new();
     let speak = |s: &str| {
         if !no_tts {
@@ -134,6 +142,13 @@ fn run() -> Result<()> {
             break;
         }
 
+        if let Some(reply) = vault.try_handle(&text) {
+            personality.update_mood(&text, "positive");
+            println!("\u{1F41D} {reply}");
+            speak(&reply);
+            continue;
+        }
+
         if CommandParser::is_desktop_command(&text) {
             let (success, result) = parser.parse_and_execute(&text);
             if success {
@@ -144,7 +159,7 @@ fn run() -> Result<()> {
             }
             match &mut brain {
                 Some(b) => {
-                    let sys_prompt = personality.system_prompt();
+                    let sys_prompt = memory_prompt(&personality, &vault);
                     match b.think_about_failure(&sys_prompt, &text, &result) {
                         Ok(reply) => {
                             println!("\u{1F41D} {reply}");
@@ -175,7 +190,7 @@ fn run() -> Result<()> {
                     personality.emoji()
                 );
                 let enhanced = format!("{emotion_ctx}\n\nUser: {text}");
-                let sys_prompt = personality.system_prompt();
+                let sys_prompt = memory_prompt(&personality, &vault);
                 match b.think(&sys_prompt, &enhanced) {
                     Ok(reply) => {
                         println!("\u{1F41D} {reply}");
@@ -198,4 +213,18 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Personality prompt enriched with persistent memories from the vault so
+/// Honey can naturally recall facts across sessions.
+fn memory_prompt(personality: &Personality, vault: &MemoryVault) -> String {
+    let mut prompt = personality.system_prompt();
+    let context = vault.prompt_context(None);
+    if !context.is_empty() {
+        prompt.push_str(&format!(
+            "\n\nMemory Vault — things you persistently remember about {}:\n{context}\nUse these naturally when relevant, as if you genuinely remember them.",
+            config::user_name()
+        ));
+    }
+    prompt
 }

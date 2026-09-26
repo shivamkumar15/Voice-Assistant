@@ -93,8 +93,9 @@ COMPLETIONS = [
     "check job 1", "focus chrome", "list windows", "go to workspace 2",
     "move mouse to the center", "click", "scroll down", "type hello world",
     "turn wifi off", "turn wifi on", "read my clipboard", "empty the trash",
-    "lock screen", "briefing", "what do you remember", "my name is ",
-    "my city is ", "remember that I prefer concise answers", "spark status",
+    "lock screen", "briefing", "what do you remember", "what do you remember about ",
+    "my name is ", "my city is ", "remember that I prefer concise answers",
+    "remember that ", "forget that ", "spark status",
     "clear chat history", "find the latest PDF in my CS folder", "read notifications",
     "git status", "create a study plan",
 ]
@@ -120,8 +121,9 @@ VOICE_HELP = (
     "• Files & study: open my CS folder · find the latest PDF · summarize it · "
     "create a study plan · read notifications\n"
     "• Developer: git status · git diff · run python code (confirmation required)\n"
-    "• Smart memory: my name is Priya · my city is Mumbai · what do you remember · "
-    "remember that I prefer concise answers · turn it up · again · briefing"
+    "• Smart memory: my name is Priya · my city is Mumbai · remember that I am "
+    "afraid of heights · what do you remember about heights · what do you remember · "
+    "forget that I am afraid of heights · turn it up · again · briefing"
 )
 
 

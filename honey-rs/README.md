@@ -69,8 +69,12 @@ group), otherwise ydotool can't inject keys.
 - **Keyboard/mouse**: "copy", "paste", "save", "press enter", "type hello world", "click", "double click", "do copy shortcut"
 - **Info**: "system info", "what time is it", "what's the date", "is it the weekend"
 - **Weather**: "what's the weather", "weather in london"
+- **Memory vault**: "remember that my sister's birthday is May 3rd", "what do you remember about birthday", "what do you remember", "forget about my sister's birthday", "forget everything"
 - **Chat**: anything else goes to ox-alpha (with Honey's emotion engine)
 - **Exit**: "bye" / "goodbye" / "exit" / "quit" / "see you"
+
+Memories persist in `~/.local/share/honey/memory_vault.json` and are injected
+into Honey's system prompt, so she recalls them across sessions.
 
 ## Layout (mirrors the Python original)
 

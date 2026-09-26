@@ -829,11 +829,28 @@ class Brain:
                     f"{key}: {value}" for key, value in list(preferences.items())[:4]
                 )
                 bits.append(f"your preferences are {pref_text}")
+            facts = mem.facts()
+            if facts:
+                bits.append("you told me " + "; ".join(facts[:3]))
             if not bits:
                 return "I don't remember anything about you yet. Say 'my name is ...' or 'my city is ...'."
             return "I remember " + ", ".join(bits) + "."
-        m = re.match(r"^remember that (.+)$", low, re.IGNORECASE)
+        # "what do you remember about X" — targeted recall of a single fact
+        m = re.match(r"^what do you (?:remember|know)(?: about)? (.+)$", low)
         if m:
+            query = m.group(1).strip()
+            hits = mem.find_facts(query) or [
+                f"{key}: {value}" for key, value in mem.preferences().items()
+                if query in key or query in value
+            ]
+            if not hits:
+                return f"I don't have anything stored about {query}."
+            return "You told me " + "; ".join(hits[:3]) + "."
+        m = re.match(r"^remember that (.+)$", c, re.IGNORECASE)
+        if m:
+            # Match the patterns on the original casing and keep the original
+            # text: "my dentist is Dr Rao" is a person, and lowercasing the
+            # value to "dr rao" makes the memory useless.
             fact = m.group(1).strip()
             m2 = re.match(r"my (favourite|favorite) (music|song) is (.+)", fact, re.IGNORECASE)
             if m2:
@@ -845,9 +862,14 @@ class Brain:
                 return f"Got it — I'll remember that you prefer {m3.group(1).strip()}."
             m3 = re.match(r"my\s+([a-z][a-z _-]{1,30})\s+is\s+(.+)$", fact, re.IGNORECASE)
             if m3:
-                mem.set_preference(m3.group(1).strip(), m3.group(2).strip())
-                return f"Got it — I'll remember your {m3.group(1).strip()} as {m3.group(2).strip()}."
-            return f"I'll remember that: {fact}."
+                key, value = m3.group(1).strip(), m3.group(2).strip()
+                if mem.set_preference(key, value):
+                    return f"Got it — I'll remember your {key} as {value}."
+            # Nothing structured to key it by, so keep the sentence as said.
+            # This used to reply "I'll remember that" and store nothing at all.
+            if mem.add_fact(fact):
+                return f"Got it — I'll remember: {fact}."
+            return f"I already have that noted: {fact}."
         m = re.match(r"^(?:i\s+)?prefer\s+(?:that\s+)?(.+)$", c, re.IGNORECASE)
         if m:
             mem.set_preference("preference", m.group(1).strip())
@@ -860,13 +882,22 @@ class Brain:
                 return f"Forgot that preference." if removed else "I didn't find that preference."
             mem.forget_preference("preference")
             return "Forgot your saved preference."
+        # "forget that I take my coffee black" — target the stored facts
+        m = re.match(r"^forget (?:that|about|this)\s+(.+)$", low)
+        if m:
+            removed = mem.forget_fact(m.group(1))
+            if removed:
+                return (f"Forgot {removed} stored fact{'' if removed == 1 else 's'}."
+                        if removed > 1 else "Forgot that.")
+            return "I didn't find anything matching that."
         m = re.match(r"^forget (everything|all|my name|my city|my music)$", low)
         if m:
             what = m.group(1)
             if what in ("everything", "all"):
                 mem.data.update({"user_name": "", "default_city": "",
                                  "favorites": {"music": "", "app": "", "website": ""},
-                                 "preferences": {}, "aliases": {}, "corrections": {}})
+                                 "preferences": {}, "facts": [], "aliases": {},
+                                 "corrections": {}})
                 mem.save()
                 return "Forgot everything I knew about you."
             if "name" in what:
@@ -988,6 +1019,8 @@ class Brain:
             r"(good (morning|afternoon|evening)|daily briefing|briefing|"
             r"start my day|morning briefing|what do you (remember|know about me)|"
             r"who am i|my preferences|forget (everything|all|my name|my city|my music)|"
+            r"what do you (remember|know)( about)? .+|"
+            r"forget (that|about|this) .+|"
             r"my name is .+|call me .+|my city is .+|remember( that)? .+|"
             r"turn it (up|down)|louder|quieter|brighter|dimmer|(do|play) (that|it) again|"
             r"again|repeat( that)?|one more time|i prefer .+|forget (my )?preference.*)",
