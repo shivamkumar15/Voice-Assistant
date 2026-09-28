@@ -2,7 +2,7 @@
 
 Three-column layout:
 
-    left    system, sound & display, weather
+    left    system, memory (what the assistant knows), sound & display, weather
     center  assistant status, quick actions, activity, jobs & timers
     right   conversation, console transcript
 
@@ -21,11 +21,11 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
 
-from .config import ASSISTANT_NAME, WAKE_WORDS  # noqa: E402
+from .config import ASSISTANT_NAME, WEATHER_CITY_DEFAULT, WAKE_WORDS  # noqa: E402
 from .worker import AssistantWorker  # noqa: E402
 
 DISPLAY_NAME = "NINJA"
-CITY_DEFAULT = "Quezon City"
+CITY_DEFAULT = ""  # resolved from memory / config at fetch time
 
 ACCENT = (0.35, 0.65, 1.00)   # #58a6ff
 GREEN = (0.25, 0.73, 0.35)    # #3fb950
@@ -69,6 +69,13 @@ scale slider { background-color: #e6edf3; border-radius: 8px; min-width: 12px; m
 .msg-action { border: none; background: transparent; color: #6e7681; font-size: 10px; padding: 0 6px 0 0; }
 .msg-action:hover { color: #58a6ff; border-color: transparent; }
 .job-row { background-color: #0d1117; border: 1px solid #2b333d; border-radius: 6px; }
+.online-pill { color: #3fb950; font-size: 9px; letter-spacing: 1px;
+               border: 1px solid #2b4a35; border-radius: 10px; padding: 1px 8px; }
+.online-pill.offline { color: #f85149; border-color: #5a2e2c; }
+.mem-chip { background-color: #21262d; border: 1px solid #30363d; border-radius: 6px;
+            padding: 3px 8px; font-size: 10px; }
+.mem-chip:hover { border-color: #f85149; }
+.mem-empty { color: #6e7681; font-size: 10px; }
 """
 
 QUICK_ACTIONS = [
@@ -79,6 +86,7 @@ QUICK_ACTIONS = [
     ("Timer 5 min", "set a timer for 5 minutes"),
     ("Joke", "tell me a joke"),
     ("Briefing", "briefing"),
+    ("Memory", "what do you remember"),
 ]
 
 COMPLETIONS = [
@@ -333,6 +341,38 @@ class ChatWindow:
         self.uptime_val.set_xalign(1)
         upt_row.pack_start(self.uptime_val, True, True, 0)
         sys_box.pack_start(upt_row, False, False, 0)
+
+        mem_panel, mem_box = self._panel("MEMORY — WHAT I KNOW")
+        left.pack_start(mem_panel, False, False, 0)
+        self.mem_summary = Gtk.Label(label="Nothing yet — tell me about yourself.")
+        self.mem_summary.get_style_context().add_class("mem-empty")
+        self.mem_summary.set_line_wrap(True)
+        self.mem_summary.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.mem_summary.set_xalign(0)
+        mem_box.pack_start(self.mem_summary, False, False, 0)
+        self.mem_chips = Gtk.FlowBox()
+        self.mem_chips.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.mem_chips.set_max_children_per_line(2)
+        self.mem_chips.set_column_spacing(4)
+        self.mem_chips.set_row_spacing(4)
+        mem_box.pack_start(self.mem_chips, False, False, 0)
+        mem_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        mem_refresh = Gtk.Button.new_with_label("⟳")
+        mem_refresh.set_tooltip_text("Refresh what the assistant remembers")
+        mem_refresh.connect("clicked", lambda b: self._refresh_memory())
+        mem_row.pack_start(mem_refresh, False, False, 0)
+        mem_ask = Gtk.Button.new_with_label("Recall")
+        mem_ask.set_tooltip_text("Ask: what do you remember")
+        mem_ask.connect("clicked", lambda b: self._send_text("what do you remember"))
+        mem_row.pack_start(mem_ask, True, True, 0)
+        self.mem_forget = Gtk.Button.new_with_label("Forget all")
+        self.mem_forget.set_tooltip_text("Wipe every remembered name, fact and preference")
+        self.mem_forget.connect("clicked", lambda b: self._forget_all())
+        mem_row.pack_start(self.mem_forget, False, False, 0)
+        mem_box.pack_start(mem_row, False, False, 0)
+        # Populate immediately — the panel must never show a stale empty
+        # state just because run() hasn't been reached yet.
+        self._refresh_memory()
 
         snd_panel, snd_box = self._panel("SOUND & DISPLAY")
         left.pack_start(snd_panel, False, False, 0)
@@ -800,7 +840,7 @@ class ChatWindow:
         return False
 
     def _weather_city(self) -> str:
-        """Remembered city wins, then the typed box, then the default."""
+        """Remembered city wins, then config, then the typed box, then none."""
         try:
             from .memory import get_memory
             saved = get_memory().default_city
@@ -808,18 +848,24 @@ class ChatWindow:
                 return saved
         except Exception:
             pass
+        if WEATHER_CITY_DEFAULT:
+            return WEATHER_CITY_DEFAULT
         try:
             typed = self.city_entry.get_text().strip()
             if typed:
                 return typed
         except Exception:
             pass
-        return CITY_DEFAULT
+        return ""
 
     def _fetch_weather(self, city: str | None = None):
+        """Fetch weather off-thread; only GLib.idle_add may touch widgets."""
         try:
             import requests
-            target = city or self._weather_city()
+            target = (city or self._weather_city()).strip()
+            if not target:
+                GLib.idle_add(self._apply_weather, "", "", "", "", "", "")
+                return
             r = requests.get(f"https://wttr.in/{target}?format=j1", timeout=10)
             if not r.ok:
                 return
@@ -836,7 +882,18 @@ class ChatWindow:
             return
 
     def _apply_weather(self, temp, desc, hum, wind, feels, city: str | None = None):
-        city = city or self._weather_city()
+        if not city:
+            # No city known yet — a calm empty state instead of a fake city.
+            self._weather.update({"temp": "--", "desc": "", "city": ""})
+            try:
+                self.w_temp.set_text("--°")
+                self.w_city.set_text("SET A CITY")
+                self.w_desc.set_text("for live weather")
+                self.w_sub.set_text("—")
+                self.top_weather.set_text("")
+            except Exception:
+                pass
+            return False
         self._weather.update({"temp": temp, "desc": desc, "city": city.upper()})
         try:
             self.w_temp.set_text(f"{temp}°")
@@ -895,6 +952,9 @@ class ChatWindow:
         elif kind == "assistant":
             self._add_message("ninja", event[1])
             self._term_append(str(event[1]))
+            # A reply may have learned something ("my name is …", city set,
+            # alias learned) — keep the memory panel truthful.
+            GLib.idle_add(self._refresh_memory)
         elif kind == "notice":
             self._add_notice(event[1])
             self._activity(str(event[1]), "dim")
@@ -1207,6 +1267,82 @@ class ChatWindow:
                         pass
         threading.Thread(target=_do, daemon=True).start()
 
+    # ----- memory panel -----
+    def _refresh_memory(self):
+        """Show the SmartMemory profile as small chips (name, city, facts…)."""
+        try:
+            for child in list(self.mem_chips.get_children()):
+                self.mem_chips.remove(child)
+        except Exception:
+            pass
+        try:
+            from .memory import get_memory
+            mem = get_memory()
+            items: list[tuple[str, str]] = []
+            if mem.user_name:
+                items.append(("name", mem.user_name))
+            if mem.default_city:
+                items.append(("city", mem.default_city))
+            for key in ("music", "app", "website"):
+                fav = mem.favorite(key)
+                if fav:
+                    items.append((f"fav {key}", fav))
+            for key, value in list(mem.preferences().items())[:6]:
+                items.append((key[:18], value[:28]))
+            for fact in mem.facts()[-6:]:
+                items.append(("fact", fact[:32]))
+            try:
+                aliases = dict(mem.data.get("aliases", {}) or {})
+            except Exception:
+                aliases = {}
+            for nick, canonical in list(aliases.items())[:4]:
+                items.append((nick, str(canonical)[:24]))
+        except Exception:
+            items = []
+        if not items:
+            self.mem_summary.set_text("Nothing yet — try 'my name is …' or "
+                                      "'remember that …'.")
+        else:
+            self.mem_summary.set_text(
+                f"{len(items)} thing{'s' if len(items) != 1 else ''} remembered:")
+            for key, value in items:
+                chip = Gtk.Label(label=f"{key}: {value}")
+                chip.get_style_context().add_class("mem-chip")
+                chip.set_ellipsize(Pango.EllipsizeMode.END)
+                chip.set_tooltip_text(f"{key}: {value}")
+                self.mem_chips.add(chip)
+        try:
+            self.mem_forget.set_sensitive(bool(items))
+        except Exception:
+            pass
+        self.win.show_all()
+
+    def _forget_all(self):
+        dlg = Gtk.MessageDialog(
+            transient_for=self.win, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text="Forget everything I know about you?")
+        dlg.format_secondary_text(
+            "Your name, city, favorites, preferences and facts are wiped. "
+            "This cannot be undone.")
+        answer = dlg.run()
+        dlg.destroy()
+        if answer != Gtk.ResponseType.YES:
+            return
+        try:
+            from .memory import get_memory
+            mem = get_memory()
+            mem.data.update({"user_name": "", "default_city": "",
+                             "favorites": {"music": "", "app": "", "website": ""},
+                             "preferences": {}, "facts": [], "aliases": {},
+                             "corrections": {}})
+            mem.save()
+        except Exception:
+            pass
+        self._refresh_memory()
+        self._activity("Memory wiped — I know nothing about you now", "amber")
+
     # ----- jobs & timers -----
     def _job_rows(self):
         """Return [(kind, id, label, status)] for jobs + timers."""
@@ -1304,29 +1440,55 @@ class ChatWindow:
 
     # ----- smart suggestion -----
     def _update_suggestion(self):
-        hint = ""
+        """Chat-aware hint: memory nudge first, then usage habits, then time."""
+        hint, cmd = "", "briefing"
         try:
             from .memory import get_memory
-            hint = get_memory().suggestion()
+            mem = get_memory()
+            hint = mem.suggestion()
+            import re as _re
+            m = _re.search(r"'([^']+)'", hint or "")
+            if m:
+                cmd = m.group(1)
         except Exception:
             hint = ""
-        if hint:
-            import re as _re
-            m = _re.search(r"'([^']+)'", hint)
-            cmd = m.group(1) if m else ""
-            self.suggest_label.set_text(hint)
-            self._suggest_cmd = cmd
+        if not hint:
+            # Habit: the most-repeated two-word command this session.
             try:
-                self.suggest_btn.set_sensitive(bool(cmd))
+                from .memory import get_memory
+                usage = dict(get_memory().data.get("usage", {}) or {})
+                usage.pop("briefing", None)
+                if usage:
+                    top = max(usage, key=lambda k: usage[k])
+                    if usage.get(top, 0) >= 2:
+                        hint = f"Say '{top}' again?"
+                        cmd = top
             except Exception:
                 pass
-        else:
-            self.suggest_label.set_text("Try 'briefing' for your daily overview")
-            self._suggest_cmd = "briefing"
-            try:
-                self.suggest_btn.set_sensitive(True)
-            except Exception:
-                pass
+        if not hint:
+            hour = datetime.now().hour
+            if hour >= 18:
+                city = ""
+                try:
+                    from .memory import get_memory
+                    city = get_memory().default_city
+                except Exception:
+                    city = ""
+                if city:
+                    hint = f"Evening check — '{'what is the weather in ' + city}'?"
+                    cmd = f"what's the weather in {city}"
+        if not hint:
+            hour = datetime.now().hour
+            hint = ("Start your day — try 'briefing' for your overview"
+                    if 5 <= hour < 12
+                    else "Try 'briefing' for your daily overview")
+            cmd = "briefing"
+        self.suggest_label.set_text(hint)
+        self._suggest_cmd = cmd
+        try:
+            self.suggest_btn.set_sensitive(bool(cmd))
+        except Exception:
+            pass
 
     def _run_suggestion(self):
         if self._suggest_cmd:
@@ -1350,6 +1512,10 @@ class ChatWindow:
         self._set_state("idle")
         self.core_status.set_text("NINJA is offline")
         self.online_pill.set_text("● OFFLINE")
+        try:
+            self.online_pill.get_style_context().add_class("offline")
+        except Exception:
+            pass
         for w in (self.entry, getattr(self, "suggest_btn", None)):
             try:
                 if w is not None:
@@ -1366,6 +1532,33 @@ class ChatWindow:
         self.worker.stop()
         Gtk.main_quit()
 
+    def _restore_conversation(self, tail: int = 6):
+        """Show the tail of the previous conversation as read-only history.
+
+        Uses the same persisted store the AI brain reads, so the chat
+        survives restarts. Called from run(); safe to call anytime.
+        """
+        try:
+            from .config import SPARK_HISTORY_PATH
+            import json as _json
+            data = _json.loads(SPARK_HISTORY_PATH.read_text())
+        except Exception:
+            return
+        if not isinstance(data, list):
+            return
+        shown = 0
+        for msg in data[-tail:]:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            content = str(msg.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                self._add_message("user" if role == "user" else "ninja",
+                                  content)
+                shown += 1
+        if shown:
+            self._add_notice("— previous conversation restored —")
+
     def run(self):
         self._activity("NINJA online — listening continuously", "accent")
         try:
@@ -1379,10 +1572,12 @@ class ChatWindow:
             f"{hello}I'm listening — just speak, or type below. "
             "Try 'briefing' for your daily overview, 'my city is …' to set "
             "weather, or use the quick actions.")
+        self._restore_conversation()
         self.win.show_all()
         try:
             self._refresh_jobs()
             self._update_suggestion()
+            self._refresh_memory()
         except Exception:
             pass
         self.entry.grab_focus()
