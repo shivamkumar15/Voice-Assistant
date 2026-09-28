@@ -162,6 +162,11 @@ SPARK_TEMPERATURE = float(os.getenv("SPARK_TEMPERATURE", "0.4"))
 SPARK_MAX_TOKENS = int(os.getenv("SPARK_MAX_TOKENS", "200"))
 # Conversation turns remembered (user+assistant pairs) for follow-ups.
 SPARK_HISTORY = int(os.getenv("SPARK_HISTORY", "12"))
+# Where the AI conversation is persisted so it survives restarts.
+SPARK_HISTORY_PATH = Path(os.getenv(
+    "SPARK_HISTORY_PATH",
+    str(Path.home() / ".local" / "share" / "ninja-assistant" / "spark-history.json"),
+))
 # When 0, Spark answers chat-only (no tool calls); when 1 (default) it can
 # act via tools (open apps, timers, volume, ...).
 SPARK_TOOLS_ENABLED = os.getenv("SPARK_TOOLS_ENABLED", "1").lower() not in (

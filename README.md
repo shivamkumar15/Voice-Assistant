@@ -154,12 +154,16 @@ python ninja.py --text
 Anything you tell it to remember is kept in `~/.local/share/ninja-assistant/memory.json`, and read back on demand:
 
 - "remember that I am afraid of heights" — free-form facts are stored as said
+- "remember that my wifi password is hunter2" — "my X is Y" facts are stored as searchable preferences
 - "what do you remember about heights" — targeted recall
-- "what do you remember" — everything it knows
+- "what's my wifi password", "who is my dentist", "do you remember my exam" — Jarvis-style recall
+- "what do you remember" / "who am i" — everything it knows
 - "forget that I am afraid of heights" — remove one fact
 - "forget everything" — wipe the lot
 
-Facts it can put a name to are stored as preferences instead, so "remember that my dentist is Dr Rao" is recalled with its capitalisation intact. The file is plain JSON capped at 20KB (roughly 100 facts), and it lives in a directory the file skills refuse to read, so the assistant cannot read its own memory back to you through a path traversal.
+Facts it can put a name to are stored as preferences instead, so "remember that my dentist is Dr Rao" is recalled with its capitalisation intact. The file is plain JSON capped at ~100KB (oldest command history is trimmed first), saved atomically, and it lives in a directory the file skills refuse to read, so the assistant cannot read its own memory back to you through a path traversal.
+
+The AI layer (Muse Spark 1.3) reads the same profile: your name, city, favorites, preferences, facts and nicknames are injected into every AI answer, so the assistant addresses you by name and uses what it knows even days later. The AI conversation itself is persisted to `spark-history.json`, so it picks up where it left off after a restart ("clear chat history" resets it).
 
 ## Notes
 

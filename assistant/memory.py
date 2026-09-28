@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -28,6 +29,7 @@ def _default_path() -> Path:
 class SmartMemory:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else _default_path()
+        self._lock = threading.RLock()
         self.data: dict = {
             "user_name": "",
             "default_city": "",
@@ -43,25 +45,84 @@ class SmartMemory:
         self.load()
 
     # ---------- persistence ----------
+    # History/usage/corrections are trimmed aggressively; facts are capped
+    # at MAX_FACTS, so the profile itself stays small. Command history is
+    # the only bulky part and is trimmed to keep the JSON far under this.
+    MAX_JSON_BYTES = 100_000
+
     def load(self):
+        with self._lock:
+            try:
+                if self.path.exists():
+                    loaded = json.loads(self.path.read_text())
+                    if isinstance(loaded, dict):
+                        for k, v in loaded.items():
+                            if k in self.data:
+                                self.data[k] = v
+                        # Repair legacy shapes: a facts list that is not a
+                        # list (or a string) previously crashed recall.
+                        if not isinstance(self.data.get("facts"), list):
+                            self.data["facts"] = []
+                        if not isinstance(self.data.get("history"), list):
+                            self.data["history"] = []
+                        for key in ("preferences", "aliases", "corrections",
+                                    "usage", "favorites"):
+                            if not isinstance(self.data.get(key), dict):
+                                self.data[key] = {}
+            except Exception as exc:
+                # A corrupted file used to be swallowed silently, so the
+                # assistant quietly "forgot" everything. Keep the broken
+                # file so the cause is visible, and say so in the terminal.
+                print(f"[memory] couldn't read {self.path} ({exc}) — "
+                      "starting with a fresh memory")
+                try:
+                    broken = self.path.with_suffix(".broken.json")
+                    if self.path.exists():
+                        broken.write_bytes(self.path.read_bytes())
+                except Exception:
+                    pass
+
+    def save(self):
+        with self._lock:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                # Trim the bulk before writing, not after: slicing the JSON
+                # string to a byte cap used to write TRUNCATED JSON to disk,
+                # which then failed to load on the next start — the whole
+                # memory silently reset every time it grew past 20KB.
+                self._trim_for_disk()
+                payload = self._serialized()
+                tmp = self.path.with_suffix(".tmp")
+                tmp.write_text(payload)
+                tmp.replace(self.path)
+            except Exception as exc:
+                print(f"[memory] save failed: {exc}")
+
+    def _trim_for_disk(self):
+        """Keep the JSON under MAX_JSON_BYTES by dropping oldest history."""
         try:
-            if self.path.exists():
-                loaded = json.loads(self.path.read_text())
-                if isinstance(loaded, dict):
-                    for k, v in loaded.items():
-                        if k in self.data:
-                            self.data[k] = v
+            # Measure exactly what save() writes (indented), or the cap
+            # silently drifts and the file keeps growing past it.
+            while len(self._serialized()) > self.MAX_JSON_BYTES:
+                hist = self.data.get("history") or []
+                if len(hist) > 5:
+                    del hist[: max(1, len(hist) // 2)]
+                    continue
+                corr = self.data.get("corrections") or {}
+                if len(corr) > 10:
+                    for k in list(corr)[: len(corr) // 2]:
+                        corr.pop(k, None)
+                    continue
+                if (self.data.get("facts") or []) and self.MAX_FACTS > 20:
+                    self.MAX_FACTS = 20
+                    del (self.data["facts"] or [])[: len(self.data["facts"]) // 2]
+                    continue
+                break  # nothing left worth dropping
         except Exception:
             pass
 
-    def save(self):
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.data, indent=2)[:20000])
-            tmp.replace(self.path)
-        except Exception:
-            pass
+    def _serialized(self) -> str:
+        return json.dumps(self.data, indent=2, ensure_ascii=False)
 
     # ---------- simple accessors ----------
     @property
@@ -73,12 +134,13 @@ class SmartMemory:
         return (self.data.get("default_city") or "").strip()
 
     def set(self, key: str, value: str):
-        if key in ("user_name", "default_city"):
-            self.data[key] = (value or "").strip()
-            self.save()
-        elif key in ("music", "app", "website"):
-            self.data.setdefault("favorites", {})[key] = (value or "").strip()
-            self.save()
+        with self._lock:
+            if key in ("user_name", "default_city"):
+                self.data[key] = (value or "").strip()
+                self.save()
+            elif key in ("music", "app", "website"):
+                self.data.setdefault("favorites", {})[key] = (value or "").strip()
+                self.save()
 
     def favorite(self, key: str) -> str:
         try:
@@ -228,12 +290,13 @@ class SmartMemory:
         cmd = (cmd or "").strip()
         if not cmd:
             return
-        entry = {"cmd": cmd[:200], "ok": bool(ok), "ts": time.time()}
-        hist = self.data.setdefault("history", [])
-        hist.append(entry)
-        del hist[:-50]
-        self.data["last"] = {"cmd": cmd[:200], "reply": (reply or "")[:500],
-                             "ts": time.time()}
+        with self._lock:
+            entry = {"cmd": cmd[:200], "ok": bool(ok), "ts": time.time()}
+            hist = self.data.setdefault("history", [])
+            hist.append(entry)
+            del hist[:-50]
+            self.data["last"] = {"cmd": cmd[:200], "reply": (reply or "")[:500],
+                                 "ts": time.time()}
         # usage counting by first two words (cheap intent key)
         key = " ".join(cmd.lower().split()[:2])
         usage = self.data.setdefault("usage", {})
@@ -257,8 +320,9 @@ class SmartMemory:
     def _auto_learn(self, cmd: str):
         low = cmd.lower()
         m = re.match(r"^play\s+(.+)$", low)
-        if m and m.group(1).strip() not in ("music", "song", "something"):
-            # most-played query becomes the music favorite
+        if m and m.group(1).strip() not in ("music", "song", "songs", "something", "a song", "some music"):
+            # most-played query becomes the music favorite (skip the generic
+            # "play music" request, which used to be saved as the favorite)
             fav = self.favorite("music")
             if not fav:
                 self.data.setdefault("favorites", {})["music"] = m.group(1).strip()

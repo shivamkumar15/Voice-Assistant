@@ -23,12 +23,14 @@ speech (no markdown) and kept concise so TTS sounds natural.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 import requests
 
@@ -43,6 +45,7 @@ from .config import (
     OPENROUTER_BASE_URL,
     OPENROUTER_MODEL,
     SPARK_HISTORY,
+    SPARK_HISTORY_PATH,
     SPARK_MAX_TOKENS,
     SPARK_PROVIDER,
     SPARK_REASONING_EFFORT,
@@ -55,6 +58,51 @@ _REQUEST_TIMEOUT = 30
 
 # Matches OpenCode CLI banners / spinners on stdout ("... > build · model").
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r")
+
+
+def user_profile_block() -> str:
+    """What the assistant knows about the user, as a prompt block.
+
+    This is the Jarvis layer: the SmartMemory profile (name, city, favorites,
+    preferences, free-form facts, nicknames) is injected into every AI call
+    on every backend, so "you remember I'm afraid of heights, right?" works
+    even days later. Empty string when nothing is known yet.
+    """
+    try:
+        from .memory import get_memory
+
+        mem = get_memory()
+    except Exception:
+        return ""
+    lines: list[str] = []
+    try:
+        if mem.user_name:
+            lines.append(f"- The user's name is {mem.user_name}.")
+        if mem.default_city:
+            lines.append(f"- The user's home city is {mem.default_city}.")
+        for key in ("music", "app", "website"):
+            fav = mem.favorite(key)
+            if fav:
+                lines.append(f"- Favorite {key}: {fav}.")
+        for key, value in list(mem.preferences().items())[:8]:
+            lines.append(f"- {key}: {value}.")
+        for fact in mem.facts()[-10:]:
+            lines.append(f"- {fact}.")
+        try:
+            aliases = dict(mem.data.get("aliases", {}) or {})
+        except Exception:
+            aliases = {}
+        for nick, canonical in list(aliases.items())[:6]:
+            lines.append(f"- '{nick}' refers to {canonical}.")
+    except Exception:
+        return ""
+    if not lines:
+        return ""
+    return (
+        "What you remember about the user (long-term memory — treat these as "
+        "established facts and use them naturally):\n"
+        + "\n".join(lines)
+    )
 
 
 def opencode_available() -> bool:
@@ -87,9 +135,15 @@ class _CreditError(RuntimeError):
 
 def _system_prompt() -> str:
     now = datetime.now().strftime("%A, %d %B %Y, %I:%M %p")
+    profile = user_profile_block()
+    if profile:
+        profile = profile + "\n\n"
     return (
-        f"You are {ASSISTANT_NAME}, a concise desktop voice assistant running on Linux. "
+        f"You are {ASSISTANT_NAME}, a concise desktop voice assistant running on Linux — "
+        "personal like Jarvis: address the user by name when you know it, and "
+        "use what you remember about them. "
         f"Current time: {now}. "
+        f"{profile}"
         "You control the user's desktop through tools: open apps/websites, play YouTube, "
         "web search, WhatsApp messages, volume/brightness, screenshots, system status, "
         "time/weather/jokes, timers, windows, typing and media keys. You can also "
@@ -338,11 +392,15 @@ class SparkBrain:
         self.available = spark_available()
         self.model = OPENROUTER_MODEL
         self.history: deque = deque(maxlen=max(2, SPARK_HISTORY))
+        self._load_history()
         if not self.available:
             print("[spark] disabled — no `opencode` CLI and no OPENROUTER_API_KEY "
                   "(regex + Needle only)")
         else:
-            print(f"[spark] ready via {resolve_provider()}")
+            remembered = len(self.history) // 2
+            tail = (f", {remembered} exchange{'s' if remembered != 1 else ''} "
+                    "restored from disk") if remembered else ""
+            print(f"[spark] ready via {resolve_provider()}{tail}")
 
 
     def handle(self, text: str) -> tuple[bool, str]:
@@ -402,6 +460,9 @@ class SparkBrain:
         if parts:
             head = ("Earlier in this conversation:\n" + "\n".join(parts[-6:])
                     + "\n\n")
+        profile = user_profile_block()
+        if profile:
+            head = profile + "\n\n" + head
         return (
             f"{head}Answer the new question below directly in one or two "
             f"short spoken-style sentences. No markdown. Do not use tools.\n\n"
@@ -554,13 +615,56 @@ class SparkBrain:
         return True, reply
 
     def reset(self):
+        """Forget the conversation — chat history and the persisted copy."""
         self.history.clear()
+        try:
+            path = Path(SPARK_HISTORY_PATH)
+            if path.exists():
+                path.unlink()
+        except Exception:
+            pass
 
     # -- internals -------------------------------------------------------
 
     def _remember(self, prompt: str, reply: str):
         self.history.append({"role": "user", "content": prompt})
         self.history.append({"role": "assistant", "content": reply})
+        self._persist_history()
+
+    def _persist_history(self):
+        """Save the conversation so it survives a restart (the Jarvis bit)."""
+        try:
+            path = Path(SPARK_HISTORY_PATH)
+            if not path.parent.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+            entries = [
+                {"role": str(m.get("role") or ""),
+                 "content": str(m.get("content") or "")[:2000]}
+                for m in self.history
+                if m.get("role") in ("user", "assistant") and m.get("content")
+            ]
+            path.write_text(
+                json.dumps(entries[-max(2, SPARK_HISTORY):], indent=1))
+        except Exception as exc:
+            print(f"[spark] history persist failed: {exc}")
+
+    def _load_history(self):
+        """Restore the previous conversation from disk on startup."""
+        try:
+            path = Path(SPARK_HISTORY_PATH)
+            if not path.exists():
+                return
+            data = json.loads(path.read_text())
+            if not isinstance(data, list):
+                return
+            for msg in data[-max(2, SPARK_HISTORY):]:
+                if (isinstance(msg, dict)
+                        and msg.get("role") in ("user", "assistant")
+                        and str(msg.get("content") or "").strip()):
+                    self.history.append({"role": msg["role"],
+                                         "content": str(msg["content"])})
+        except Exception as exc:
+            print(f"[spark] couldn't restore history ({exc})")
 
     @staticmethod
     def _parse_args(raw) -> dict:
@@ -612,8 +716,8 @@ class SparkBrain:
                 raise RuntimeError(msg)  # fail fast — no budget will cover this
             if ("more credits" in lowered or "fewer max_tokens" in lowered
                     or "prompt tokens limit" in lowered or "token limit" in lowered
-                    or "context length" in lowered or "max_tokens" in lowered
-                    and "afford" in lowered):
+                    or "context length" in lowered
+                    or ("max_tokens" in lowered and "afford" in lowered)):
                 raise _CreditError(msg)
             raise RuntimeError(msg)
         return data
@@ -710,7 +814,16 @@ class SparkBrain:
             return ("Spark brain is disabled — install the `opencode` CLI "
                     "(free tier) or set OPENROUTER_API_KEY")
         provider = resolve_provider()
-        hist = f"{len(self.history)//2} exchanges remembered"
+        hist = f"{len(self.history)//2} exchanges in memory"
+        try:
+            from .memory import get_memory as _gm
+
+            facts = len(_gm().facts())
+        except Exception:
+            facts = 0
+        if facts:
+            hist += (f", {facts} long-term fact{'s' if facts != 1 else ''} "
+                     "about you")
         if provider == "opencode":
             return (
                 f"Muse Spark 1.3 free via OpenCode CLI ({OPENCODE_MODEL}, "
@@ -765,7 +878,8 @@ def legacy_chat(prompt: str) -> tuple[bool, str]:
                         "content": (
                             f"You are {ASSISTANT_NAME}, a concise desktop voice "
                             "assistant. Answer in one or two short spoken-style "
-                            "sentences. No markdown."
+                            "sentences. No markdown. "
+                            + (user_profile_block() or "")
                         ),
                     },
                     {"role": "user", "content": prompt},

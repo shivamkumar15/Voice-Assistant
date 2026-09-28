@@ -78,8 +78,8 @@ def chat(prompt: str):
 
         if not spark_available():
             return False, (
-                "That's not a command I know yet. Try: open youtube, play song , "
-                "volume up,"
+                "That's not a command I know yet. Try: open youtube, "
+                "play believer, volume up, or set a timer for 10 minutes."
             )
         spark = get_spark()
         ok, reply = spark.ask(prompt)

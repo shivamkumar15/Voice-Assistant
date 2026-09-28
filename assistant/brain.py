@@ -657,7 +657,14 @@ class Brain:
         if re.match(r"^(hi|hello|hey|yo|good (morning|afternoon|evening)|namaste)\b", command):
             hour = datetime.now().hour
             part = "morning" if hour < 12 else "afternoon" if hour < 17 else "evening"
-            return f"Hello! Good {part}. What can I do for you?"
+            name = ""
+            try:
+                if self.memory is not None:
+                    name = self.memory.user_name
+            except Exception:
+                name = ""
+            who = f", {name}" if name else ""
+            return f"Hello{who}! Good {part}. What can I do for you?"
         if re.search(r"\bthank(s| you)\b", command):
             return "You're welcome!"
         if re.search(r"\bhow are you\b", command):
@@ -713,11 +720,14 @@ class Brain:
                     return True, setter_reply
                 smart_cmd = _smart.preprocess(text, mem)
                 if smart_cmd and smart_cmd != text:
-                    # remember the raw phrasing -> resolved mapping
-                    try:
-                        mem.learn_correction(text, smart_cmd)
-                    except Exception:
-                        pass
+                    # Remember raw phrasing -> resolved mapping ONLY when the
+                    # result is a real command: learning chat rewrites ("what
+                    # is love" -> a fuzzy-mangled variant) poisons memory.
+                    if _smart.looks_like_command(smart_cmd):
+                        try:
+                            mem.learn_correction(text, smart_cmd)
+                        except Exception:
+                            pass
                     text = smart_cmd
                 # "good morning" / "briefing" -> proactive daily brief
                 if re.fullmatch(
@@ -727,6 +737,10 @@ class Brain:
                 # "what do you remember" / "forget ..." memory controls
                 mem_reply = self._handle_memory_commands(text)
                 if mem_reply is not None:
+                    try:
+                        mem.remember(text, mem_reply, ok=True)
+                    except Exception:
+                        pass
                     return True, mem_reply
         except Exception:
             pass
@@ -846,7 +860,34 @@ class Brain:
             if not hits:
                 return f"I don't have anything stored about {query}."
             return "You told me " + "; ".join(hits[:3]) + "."
-        m = re.match(r"^remember that (.+)$", c, re.IGNORECASE)
+        # Jarvis recall: "what's my wifi password", "who is my dentist",
+        # "do you remember my exam date". Only answers when something is
+        # actually stored — otherwise falls through to the AI chat.
+        m = re.match(
+            r"^(?:what(?:'s| is| was)|who(?:'s| is| was)|where(?:'s| is| was))\s+"
+            r"(?:my |the |about my |about the )?(.+)$", low)
+        if m:
+            recalled = self._recall_memory(m.group(1))
+            if recalled:
+                return recalled
+        m = re.match(
+            r"^do you (?:remember|know)(?: about| that)?\s+(?:my |the |about my )?(.+)$", low)
+        if m:
+            recalled = self._recall_memory(m.group(1))
+            if recalled:
+                return recalled
+        # "remember <nick> is <canonical>" -> alias, e.g. "remember mom is Priya".
+        # Before the general fact capture; "my X is Y" goes to preferences below.
+        # The lookahead keeps "remember that my exam is on Friday" away from
+        # here ("that my exam" is not a nickname) — that lands in facts.
+        m = re.match(
+            r"^remember (?!that\b|my\b|this\b|about\b|i\b)(\w[\w .'-]{0,20}?)\s+is\s+"
+            r"([\w .@+'-]{1,40})$", c, re.IGNORECASE)
+        if (m and "favorite" not in low and "favourite" not in low
+                and not m.group(1).lower().startswith("my ")):
+            mem.add_alias(m.group(1).strip(), m.group(2).strip())
+            return f"Got it — I'll remember {m.group(1).strip()} as {m.group(2).strip()}."
+        m = re.match(r"^remember (?:that\s+)?(.+)$", c, re.IGNORECASE)
         if m:
             # Match the patterns on the original casing and keep the original
             # text: "my dentist is Dr Rao" is a person, and lowercasing the
@@ -908,12 +949,53 @@ class Brain:
                 return "Forgot your default city."
             mem.set("music", "")
             return "Forgot your favorite music."
-        # "remember <nick> is <canonical>" -> alias, e.g. "remember mom is Priya"
-        m = re.match(r"^remember (\w[\w .'-]{0,20}) is ([\w .@+'-]{1,40})$", c, re.IGNORECASE)
-        if m and "favorite" not in low and "favourite" not in low:
-            mem.add_alias(m.group(1).strip(), m.group(2).strip())
-            return f"Got it — I'll remember {m.group(1).strip()} as {m.group(2).strip()}."
         return None
+
+    def _recall_memory(self, query: str) -> str | None:
+        """Search preferences, facts and aliases for *query*.
+
+        Returns None when nothing matches (so the caller can fall through to
+        the AI chat) or when the query is really an info command ("what's the
+        time" must stay a time query, not a memory lookup).
+        """
+        mem = self.memory
+        if mem is None:
+            return None
+        qlow = (query or "").lower().strip(" .!?")
+        if not qlow:
+            return None
+        if re.search(
+            r"\b(time|date|day|weather|temperature|battery|cpu|ram|disk|"
+            r"uptime|joke|volume|brightness)\b", qlow,
+        ):
+            return None
+        hits: list[str] = []
+        if mem.user_name and "name" in qlow:
+            hits.append(f"your name is {mem.user_name}")
+        if mem.default_city and "city" in qlow:
+            hits.append(f"your city is {mem.default_city}")
+        pref = mem.get_preference(qlow)
+        if pref:
+            hits.append(f"your {qlow} is {pref}")
+        for key, value in mem.preferences().items():
+            if key != qlow and (key in qlow or qlow in key or qlow in value):
+                hits.append(f"your {key} is {value}")
+        hits.extend(mem.find_facts(query))
+        try:
+            aliases = dict(mem.data.get("aliases", {}) or {})
+        except Exception:
+            aliases = {}
+        qwords = set(re.findall(r"[a-z0-9']+", qlow))
+        for nick, canonical in aliases.items():
+            nwords = set(re.findall(r"[a-z0-9']+", str(nick).lower()))
+            cwords = set(re.findall(r"[a-z0-9']+", str(canonical).lower()))
+            if (qwords & nwords) or (qwords & cwords):
+                hits.append(f"{nick} is {canonical}")
+        if not hits:
+            return None
+        seen: set[str] = set()
+        ordered = [h for h in hits if not (h in seen or seen.add(h))]
+        return "You told me " + "; ".join(ordered[:3]) + "."
 
     def _daily_briefing(self) -> str:
         """Proactive morning brief: greeting + time + weather + system."""

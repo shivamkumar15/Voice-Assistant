@@ -70,21 +70,29 @@ def fuzzy_repair(text: str) -> str:
     words = t.split()
     if not words:
         return t
-    # verb (first word)
-    v = words[0].lower().strip(".,!?")
-    if v not in _VERBS:
-        hit = difflib.get_close_matches(v, _VERBS, n=1, cutoff=0.70)
-        if hit:
-            words[0] = hit[0] if words[0].islower() else hit[0]
-    # nouns (remaining words, only short alphabetic tokens)
+    # Contraction apostrophes are not typos: difflib "repairs" what's -> what,
+    # isn't -> isn, i'm -> i — and that mangled form then gets stored as a
+    # learned correction, permanently breaking questions. Protect them.
+    _APOS = "\x00"
+    protected = [w.replace("'", _APOS) if "'" in w else w for w in words]
+    # verb (first word) — never touch contractions ("what's" must not
+    # become "what": the verb matcher ignores apostrophes otherwise)
+    if "'" not in words[0]:
+        v = words[0].lower().strip(".,!?")
+        if v not in _VERBS:
+            hit = difflib.get_close_matches(v, _VERBS, n=1, cutoff=0.70)
+            if hit:
+                protected[0] = hit[0] if words[0].islower() else hit[0]
+    # nouns (remaining words, only short alphabetic tokens; read the
+    # protected words so apostrophes can't be repaired away)
     for i in range(1, len(words)):
-        w = words[i].lower().strip(".,!?")
+        w = protected[i].lower().strip(".,!?")
         if not w or len(w) < 4 or not w.isalpha() or w in _NOUNS:
             continue
         hit = difflib.get_close_matches(w, _NOUNS, n=1, cutoff=0.82)
         if hit:
-            words[i] = hit[0]
-    out = " ".join(words)
+            protected[i] = hit[0]
+    out = " ".join(w.replace(_APOS, "'") for w in protected)
     # common STT mangles
     out = re.sub(r"\byoutub\b", "youtube", out, flags=re.IGNORECASE)
     out = re.sub(r"\bvolum\b", "volume", out, flags=re.IGNORECASE)
@@ -209,3 +217,39 @@ def preprocess(text: str, memory) -> str:
     except Exception:
         pass
     return t
+
+
+# Question-word starts: these are chat, not commands — fuzzy repair must
+# never touch them ("what's my password" -> "what my password" used to be
+# stored as a learned correction, breaking the question forever).
+_QUESTION_START = re.compile(
+    r"^(what|where|when|who|why|how|which|do|does|did|is|are|was|were|"
+    r"can|could|will|would|should|tell me about)\b", re.IGNORECASE)
+
+
+def looks_like_command(text: str) -> bool:
+    """Cheap check that *text* starts like a real command.
+
+    Used before storing a learned correction: only command-shaped rewrites
+    ("opne youtub" -> "open youtube") deserve to be remembered, never chat
+    or questions.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 160:
+        return False
+    if _QUESTION_START.match(t):
+        return False
+    first = t.split()[0].lower().strip(".,!?")
+    if first in _VERBS:
+        return True
+    # "my name is ..." style setters are also command-shaped.
+    return bool(re.match(r"^(my name is|call me|my city is)\b", t, re.IGNORECASE))
+
+
+def preprocess_for_memory(text: str, memory) -> str:
+    """Resolve aliases/nicknames only, preserving the user's own phrasing.
+
+    Used when deciding what to store: 'remember mom is Priya' must not be
+    fuzzy-repaired or lowercase-corrected before it hits the memory layer.
+    """
+    return memory.resolve_alias((text or "").strip())
