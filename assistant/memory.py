@@ -6,8 +6,12 @@ in a small JSON file so the assistant gets smarter over time:
 - remembers your name, default city, favourite music, volume defaults
 - keeps free-form facts that don't fit a preference ("I'm afraid of heights")
 - learns contact/app nicknames ("mom" -> WhatsApp contact, "vscode" -> "code")
+- recalls by ranked search, so "about my dentist appointment" still finds
+  the stored "my dentist is Dr Rao"
+- learns favourites from habit (most-played music, most-opened app/site)
 - keeps last ~50 commands for context resolution ("turn it up", "again")
-- tracks usage counts for proactive suggestions ("you often check weather...")
+- tracks usage counts for proactive suggestions ("you usually 'open github'
+  around now")
 
 File: ~/.local/share/ninja-assistant/memory.json
 No third-party deps, never raises on load/save.
@@ -26,6 +30,14 @@ def _default_path() -> Path:
     return Path.home() / ".local" / "share" / "ninja-assistant" / "memory.json"
 
 
+# "play music"-style requests must never be stored as the favorite — they
+# say nothing about what the user actually likes.
+_GENERIC_PLAYS = frozenset({
+    "music", "song", "songs", "playlist", "something", "a song",
+    "some music", "some songs", "something chill", "anything",
+})
+
+
 class SmartMemory:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else _default_path()
@@ -40,6 +52,8 @@ class SmartMemory:
             "corrections": {},      # misheard -> intended ("oprn youtube" -> "open youtube")
             "history": [],          # [{cmd, reply_ok, ts}]
             "usage": {},            # intent-key -> count
+            "play_counts": {},      # "play <query>" request -> times asked
+            "open_counts": {},      # "open <target>" request -> times asked
             "last": {"cmd": "", "reply": "", "ts": 0.0},
         }
         self.load()
@@ -66,7 +80,8 @@ class SmartMemory:
                         if not isinstance(self.data.get("history"), list):
                             self.data["history"] = []
                         for key in ("preferences", "aliases", "corrections",
-                                    "usage", "favorites"):
+                                    "usage", "favorites", "play_counts",
+                                    "open_counts"):
                             if not isinstance(self.data.get(key), dict):
                                 self.data[key] = {}
             except Exception as exc:
@@ -117,7 +132,16 @@ class SmartMemory:
                     self.MAX_FACTS = 20
                     del (self.data["facts"] or [])[: len(self.data["facts"]) // 2]
                     continue
-                break  # nothing left worth dropping
+                # Habit counters are the last bulk worth biting into: keep the
+                # most-used entries, drop the long tail of one-off requests.
+                for key in ("play_counts", "open_counts"):
+                    counts = self.data.get(key) or {}
+                    if len(counts) > 40:
+                        keep = sorted(counts, key=lambda k: -counts[k])[:20]
+                        self.data[key] = {k: counts[k] for k in keep}
+                        break
+                else:
+                    break  # nothing left worth dropping
         except Exception:
             pass
 
@@ -173,10 +197,17 @@ class SmartMemory:
             return {}
 
     def forget_preference(self, key: str) -> bool:
-        key = (key or "").lower().strip()
+        # Sanitise exactly like set_preference, or "forget my sister's name"
+        # would look for "sister's name" and never find "sisters name".
+        key = re.sub(r"[^a-z0-9 _-]+", "", (key or "").lower()).strip()
         preferences = self.data.setdefault("preferences", {})
         if key not in preferences:
-            return False
+            for existing in list(preferences):
+                if len(key) > 3 and (key in existing or existing in key):
+                    key = existing
+                    break
+            else:
+                return False
         preferences.pop(key, None)
         self.save()
         return True
@@ -221,17 +252,125 @@ class SmartMemory:
         except Exception:
             return []
 
-    def find_facts(self, query: str) -> list:
-        """Facts containing any word of *query* (all words must match)."""
-        words = [w for w in re.findall(r"[a-z0-9']+", (query or "").lower()) if len(w) > 2]
+    @staticmethod
+    def _query_words(query: str) -> list:
+        """Content words of a recall query (short filler like "my" dropped).
+
+        Apostrophes are folded away so "sister's" matches a stored
+        "sisters name" preference rather than looking like an unknown token.
+        """
+        return [w.replace("'", "") for w in re.findall(r"[a-z0-9']+",
+                                                       (query or "").lower())
+                if len(w.replace("'", "")) > 2]
+
+    def find_facts(self, query: str, limit: int = 0) -> list:
+        """Facts relevant to *query*, best match first.
+
+        Ranked instead of the old all-words-must-match filter: asking "what
+        do you remember about my dentist appointment" used to miss the stored
+        "my dentist is Dr Rao on Friday" purely because the word
+        "appointment" was never in it. Facts that cover more of the query
+        still sort first; a lone short-word overlap ("name", "the") is not
+        treated as a match.
+        """
+        words = self._query_words(query)
         if not words:
             return []
-        hits = []
+        scored: list[tuple[float, int, str]] = []
         for fact in self.facts():
-            lowered = fact.lower()
-            if all(word in lowered for word in words):
-                hits.append(fact)
-        return hits
+            # Fold apostrophes the same way the query words were folded, or
+            # "sisters" would never match a stored "sister's".
+            lowered = fact.lower().replace("'", "")
+            matched = [w for w in words if w in lowered]
+            if not matched:
+                continue
+            score = len(matched) / len(words)
+            if score < 0.5:
+                continue  # too little of the query is actually in this fact
+            if len(matched) == 1 and len(matched[0]) < 5:
+                continue  # a single vague word is noise, not recall
+            scored.append((score, len(matched), fact))
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        hits = [fact for _, _, fact in scored]
+        return hits[:limit] if limit else hits
+
+    def search(self, query: str, limit: int = 3) -> list:
+        """Ranked recall across everything stored about the user.
+
+        One place that answers "what's my X" / "what do you remember about
+        X" from facts, preferences, favourites, name, city and aliases, so
+        the assistant can't store something and then fail to recall it.
+        Returns display-ready phrases ("your wifi password is hunter2"),
+        best first; empty when nothing genuinely matches.
+        """
+        words = self._query_words(query)
+        if not words:
+            return []
+        wset = set(words)
+        qlow = (query or "").lower()
+        ranked: list[tuple[float, str]] = []
+
+        def add(score: float, phrase: str):
+            if phrase:
+                ranked.append((score, phrase))
+
+        # Only treat these as the user's own name/city when nothing else is
+        # being asked about — "what's my sister's name" must not answer with
+        # the user's own name.
+        name_q = {"name", "first", "last", "full", "called"}
+        city_q = {"city", "home", "town", "live", "living", "based", "from"}
+        if self.user_name and "name" in wset and wset <= name_q:
+            add(1.0, f"your name is {self.user_name}")
+        if self.default_city and (wset & {"city", "home"}) and wset <= city_q:
+            add(1.0, f"your city is {self.default_city}")
+        favorites = self.data.get("favorites", {}) or {}
+        if (wset & {"music", "song", "songs", "playlist", "artist"}) \
+                and str(favorites.get("music") or "").strip():
+            add(0.9, f"your favorite music is {str(favorites['music']).strip()}")
+        if (wset & {"app", "application", "editor"}) \
+                and str(favorites.get("app") or "").strip():
+            add(0.9, f"your favorite app is {str(favorites['app']).strip()}")
+        if (wset & {"website", "site", "webpage"}) \
+                and str(favorites.get("website") or "").strip():
+            add(0.9, f"your favorite website is {str(favorites['website']).strip()}")
+        # "name" and "city" are the words we answer from the dedicated
+        # slots above; letting them also drive fuzzy preference matching made
+        # "what's my name" drag in "your sister's name is Anya".
+        overlap_words = [w for w in words if w not in {"name", "city"}]
+        for key, value in self.preferences().items():
+            klow = str(key).lower()
+            if key in wset or (len(klow) > 3 and klow in qlow):
+                add(1.0, f"your {key} is {value}")
+                continue
+            overlap = sum(1 for w in overlap_words
+                          if w in klow or w in str(value).lower())
+            if overlap:
+                add(0.6 * overlap / len(words), f"your {key} is {value}")
+        for fact in self.find_facts(query):
+            add(0.8, fact)
+        try:
+            aliases = dict(self.data.get("aliases", {}) or {})
+        except Exception:
+            aliases = {}
+        for nick, canonical in aliases.items():
+            nwords = {w.replace("'", "") for w in
+                      re.findall(r"[a-z0-9']+", str(nick).lower())}
+            cwords = {w.replace("'", "") for w in
+                      re.findall(r"[a-z0-9']+", str(canonical).lower())}
+            if wset & (nwords | cwords):
+                add(0.7, f"{nick} is {canonical}")
+
+        ranked.sort(key=lambda item: -item[0])
+        out: list[str] = []
+        seen: set[str] = set()
+        for _, phrase in ranked:
+            if phrase in seen:
+                continue
+            seen.add(phrase)
+            out.append(phrase)
+            if len(out) >= limit:
+                break
+        return out
 
     def forget_fact(self, query: str) -> int:
         """Drop every fact matching *query*. Returns how many were removed."""
@@ -253,6 +392,22 @@ class SmartMemory:
         if nick and canonical and nick != canonical.lower():
             self.data.setdefault("aliases", {})[nick] = canonical
             self.save()
+
+    def forget_alias(self, nick: str) -> bool:
+        """Drop a learned nickname -> canonical mapping. True when found."""
+        nick = (nick or "").lower().strip()
+        aliases = self.data.setdefault("aliases", {})
+        if nick not in aliases:
+            # tolerate partial recall ("forget mom" for "mom's number")
+            for key in list(aliases):
+                if key == nick or (len(nick) > 3 and nick in key):
+                    nick = key
+                    break
+            else:
+                return False
+        aliases.pop(nick, None)
+        self.save()
+        return True
 
     def resolve_alias(self, text: str) -> str:
         """Replace known nicknames inside *text* (word-boundary safe)."""
@@ -318,14 +473,31 @@ class SmartMemory:
             return []
 
     def _auto_learn(self, cmd: str):
-        low = cmd.lower()
+        low = cmd.lower().strip()
         m = re.match(r"^play\s+(.+)$", low)
-        if m and m.group(1).strip() not in ("music", "song", "songs", "something", "a song", "some music"):
-            # most-played query becomes the music favorite (skip the generic
-            # "play music" request, which used to be saved as the favorite)
-            fav = self.favorite("music")
-            if not fav:
-                self.data.setdefault("favorites", {})["music"] = m.group(1).strip()
+        if m:
+            query = m.group(1).strip()
+            if query and query not in _GENERIC_PLAYS:
+                counts = self.data.setdefault("play_counts", {})
+                counts[query] = int(counts.get(query, 0)) + 1
+                # The most-played request becomes the favourite, so a one-off
+                # ("play happy birthday") doesn't lock the slot forever the
+                # way first-play-wins used to. Ties keep the earlier pick.
+                best = max(counts, key=lambda k: counts[k])
+                self.data.setdefault("favorites", {})["music"] = best
+        m = re.match(r"^(?:open|go to|launch|visit|start)\s+(.+)$", low)
+        if m:
+            target = m.group(1).strip()
+            # Skip one-off/parametrised targets ("go to workspace 2", "open
+            # file notes.txt"): only a genuinely habitual name is worth
+            # promoting to "open my app".
+            if (target and "workspace" not in target and "my " not in target
+                    and "file " not in target and len(target) <= 30
+                    and not re.search(r"\d", target)):
+                counts = self.data.setdefault("open_counts", {})
+                counts[target] = int(counts.get(target, 0)) + 1
+                if counts[target] >= 3:
+                    self.data.setdefault("favorites", {})["app"] = target
         m = re.search(r"weather(?:.*?(?:in|at|for)\s+(.+))?$", low)
         if m and m.group(1):
             city = m.group(1).strip(" ?!.")
@@ -334,12 +506,49 @@ class SmartMemory:
 
     # ---------- proactive ----------
     def suggestion(self) -> str:
-        """A short proactive hint based on time + usage. '' when nothing useful."""
+        """A short proactive hint, '' when nothing useful applies.
+
+        Prefers a real pattern in the history — what this user tends to run
+        around this hour and hasn't run yet today — over the hard-coded time
+        rules, which are now only fallbacks.
+        """
         try:
             import datetime as _dt
-            hour = _dt.datetime.now().hour
+
+            now = _dt.datetime.now()
+            hist = self.data.get("history", []) or []
+            if len(hist) >= 5:
+                def _ts(entry):
+                    try:
+                        return _dt.datetime.fromtimestamp(float(entry.get("ts")))
+                    except Exception:
+                        return None
+
+                done_today = set()
+                slot_counts: dict[str, int] = {}
+                for entry in hist:
+                    if not isinstance(entry, dict):
+                        continue
+                    when = _ts(entry)
+                    if when is None:
+                        continue
+                    key = " ".join(str(entry.get("cmd", "")).lower().split()[:2]).strip()
+                    if not key:
+                        continue
+                    if when.date() == now.date():
+                        done_today.add(key)
+                    if abs(when.hour - now.hour) <= 1:
+                        slot_counts[key] = slot_counts.get(key, 0) + 1
+                for key in ("good morning", "good evening", "daily briefing"):
+                    done_today.add(key)
+                candidates = {k: n for k, n in slot_counts.items()
+                              if n >= 2 and k not in done_today}
+                if candidates:
+                    top = max(candidates, key=lambda k: candidates[k])
+                    return f"You usually '{top}' around now"
             usage = self.data.get("usage", {}) or {}
-            if 5 <= hour < 12 and usage.get("play", 0) == 0 and len(self.data.get("history", [])) < 5:
+            hour = now.hour
+            if 5 <= hour < 12 and usage.get("play", 0) == 0 and len(hist) < 5:
                 return "Try 'play lofi beats' to start your morning"
             if hour >= 18 and "weather" not in usage:
                 city = self.default_city or "your city"

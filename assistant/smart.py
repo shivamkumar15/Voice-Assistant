@@ -147,8 +147,17 @@ def resolve_context(text: str, last_cmd: str) -> str:
     return t
 
 
+_MY_APP_RE = re.compile(
+    r"^(?:open|go to|launch|visit|start)\s+(?:my|the)\s+"
+    r"(app|application|editor|website|site|webpage)$", re.IGNORECASE)
+
+
 def expand_my_defaults(text: str, favorites: dict) -> str:
-    """'play my music' -> 'play <favorite>'; 'open my editor' etc."""
+    """Resolve "my X" to a learned favourite.
+
+    'play my music' -> 'play <favorite>'; 'open my app' / 'open my website'
+    use the app/website slots that memory learns from habitual use.
+    """
     t = (text or "").strip()
     low = t.lower()
     if re.fullmatch(r"play (my |favourite |favorite )?(music|song|songs|playlist)", low):
@@ -156,6 +165,13 @@ def expand_my_defaults(text: str, favorites: dict) -> str:
         if fav:
             return f"play {fav}"
         return "play music"
+    m = _MY_APP_RE.match(low)
+    if m:
+        key = "app" if m.group(1).lower() in ("app", "application", "editor") \
+            else "website"
+        fav = (favorites or {}).get(key, "")
+        if fav:
+            return f"open {fav}"
     return t
 
 
