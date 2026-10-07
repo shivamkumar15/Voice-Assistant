@@ -823,6 +823,14 @@ class Brain:
     def _handle_memory_commands(self, text: str):
         """'remember X', 'forget ...', 'what do you remember' controls."""
         c = (text or "").strip()
+        # "note that ...", "keep in mind ...", "don't forget ..." all mean
+        # "remember ...": fold them into the one verb so every capture path
+        # below applies instead of the phrase falling through to AI chat.
+        c = re.sub(
+            r"^(?:please\s+)?(?:note|remember|keep in mind|don't forget|"
+            r"do not forget|take a note|jot down)[,:]?\s+(?:that\s+)?",
+            "remember ", c, flags=re.IGNORECASE,
+        )
         low = c.lower().strip(" .!?")
         mem = self.memory
         if mem is None:
@@ -834,9 +842,10 @@ class Brain:
                 bits.append(f"your name is {mem.user_name}")
             if mem.default_city:
                 bits.append(f"default city is {mem.default_city}")
-            fav = mem.favorite("music")
-            if fav:
-                bits.append(f"favorite music is {fav}")
+            for key in ("music", "app", "website"):
+                fav = mem.favorite(key)
+                if fav:
+                    bits.append(f"favorite {key} is {fav}")
             preferences = mem.preferences()
             if preferences:
                 pref_text = "; ".join(
@@ -849,17 +858,14 @@ class Brain:
             if not bits:
                 return "I don't remember anything about you yet. Say 'my name is ...' or 'my city is ...'."
             return "I remember " + ", ".join(bits) + "."
-        # "what do you remember about X" — targeted recall of a single fact
+        # "what do you remember about X" — targeted recall across the profile
         m = re.match(r"^what do you (?:remember|know)(?: about)? (.+)$", low)
         if m:
             query = m.group(1).strip()
-            hits = mem.find_facts(query) or [
-                f"{key}: {value}" for key, value in mem.preferences().items()
-                if query in key or query in value
-            ]
+            hits = mem.search(query)
             if not hits:
                 return f"I don't have anything stored about {query}."
-            return "You told me " + "; ".join(hits[:3]) + "."
+            return "You told me " + "; ".join(hits) + "."
         # Jarvis recall: "what's my wifi password", "who is my dentist",
         # "do you remember my exam date". Only answers when something is
         # actually stored — otherwise falls through to the AI chat.
@@ -901,7 +907,7 @@ class Brain:
             if m3:
                 mem.set_preference("preference", m3.group(1).strip())
                 return f"Got it — I'll remember that you prefer {m3.group(1).strip()}."
-            m3 = re.match(r"my\s+([a-z][a-z _-]{1,30})\s+is\s+(.+)$", fact, re.IGNORECASE)
+            m3 = re.match(r"my\s+([a-z][a-z0-9 '_-]{1,40}?)\s+is\s+(.+)$", fact, re.IGNORECASE)
             if m3:
                 key, value = m3.group(1).strip(), m3.group(2).strip()
                 if mem.set_preference(key, value):
@@ -938,7 +944,8 @@ class Brain:
                 mem.data.update({"user_name": "", "default_city": "",
                                  "favorites": {"music": "", "app": "", "website": ""},
                                  "preferences": {}, "facts": [], "aliases": {},
-                                 "corrections": {}})
+                                 "corrections": {}, "play_counts": {},
+                                 "open_counts": {}})
                 mem.save()
                 return "Forgot everything I knew about you."
             if "name" in what:
@@ -949,10 +956,24 @@ class Brain:
                 return "Forgot your default city."
             mem.set("music", "")
             return "Forgot your favorite music."
+        # Catch-all: "forget mom" drops a learned nickname, "forget the
+        # dentist" drops a stored preference, "forget the meeting" drops a
+        # stored fact. Recall is ranked now, so a near-miss query finds what
+        # it should — forgetting has to keep up.
+        m = re.match(r"^forget\s+(?:the\s+|my\s+)?(.+)$", low)
+        if m:
+            target = m.group(1).strip()
+            if mem.forget_alias(target):
+                return f"Forgot what '{target}' refers to."
+            if mem.forget_preference(target):
+                return f"Forgot your {target}."
+            removed = mem.forget_fact(target)
+            if removed:
+                return "Forgot that." if removed == 1 else f"Forgot {removed} stored facts."
         return None
 
     def _recall_memory(self, query: str) -> str | None:
-        """Search preferences, facts and aliases for *query*.
+        """Ranked recall of *query* from the whole stored profile.
 
         Returns None when nothing matches (so the caller can fall through to
         the AI chat) or when the query is really an info command ("what's the
@@ -969,33 +990,13 @@ class Brain:
             r"uptime|joke|volume|brightness)\b", qlow,
         ):
             return None
-        hits: list[str] = []
-        if mem.user_name and "name" in qlow:
-            hits.append(f"your name is {mem.user_name}")
-        if mem.default_city and "city" in qlow:
-            hits.append(f"your city is {mem.default_city}")
-        pref = mem.get_preference(qlow)
-        if pref:
-            hits.append(f"your {qlow} is {pref}")
-        for key, value in mem.preferences().items():
-            if key != qlow and (key in qlow or qlow in key or qlow in value):
-                hits.append(f"your {key} is {value}")
-        hits.extend(mem.find_facts(query))
-        try:
-            aliases = dict(mem.data.get("aliases", {}) or {})
-        except Exception:
-            aliases = {}
-        qwords = set(re.findall(r"[a-z0-9']+", qlow))
-        for nick, canonical in aliases.items():
-            nwords = set(re.findall(r"[a-z0-9']+", str(nick).lower()))
-            cwords = set(re.findall(r"[a-z0-9']+", str(canonical).lower()))
-            if (qwords & nwords) or (qwords & cwords):
-                hits.append(f"{nick} is {canonical}")
+        # One ranked search across facts, preferences, favourites, name,
+        # city and aliases — so a favourite or a stored value answers
+        # "what's my ..." just as readily as a free-form fact.
+        hits = mem.search(query)
         if not hits:
             return None
-        seen: set[str] = set()
-        ordered = [h for h in hits if not (h in seen or seen.add(h))]
-        return "You told me " + "; ".join(ordered[:3]) + "."
+        return "You told me " + "; ".join(hits) + "."
 
     def _daily_briefing(self) -> str:
         """Proactive morning brief: greeting + time + weather + system."""
