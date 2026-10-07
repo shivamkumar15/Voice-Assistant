@@ -154,11 +154,16 @@ python ninja.py --text
 Anything you tell it to remember is kept in `~/.local/share/ninja-assistant/memory.json`, and read back on demand:
 
 - "remember that I am afraid of heights" — free-form facts are stored as said
+- "note that my dentist is Dr Rao" / "keep in mind my sister's name is Anya" — same as "remember"
 - "remember that my wifi password is hunter2" — "my X is Y" facts are stored as searchable preferences
 - "what do you remember about heights" — targeted recall
-- "what's my wifi password", "who is my dentist", "do you remember my exam" — Jarvis-style recall
+- Recall is ranked, not exact-match: "what do you remember about my dentist appointment" still finds the stored "my dentist is Dr Rao" even though you never said "appointment"
+- "what's my wifi password", "who is my dentist", "what's my favorite music", "do you remember my exam" — Jarvis-style recall across facts, preferences, favourites, nicknames, name and city
 - "what do you remember" / "who am i" — everything it knows
+- Favourites are learned from habit: the most-played song answers "play my music", and the app or site you open most answers "open my app" / "open my website"
+- Proactive hints follow your actual routine, e.g. "you usually 'open github' around now", once a day at most
 - "forget that I am afraid of heights" — remove one fact
+- "forget my sister's name" / "forget mom" — remove a stored "my X" or a learned nickname
 - "forget everything" — wipe the lot
 
 Facts it can put a name to are stored as preferences instead, so "remember that my dentist is Dr Rao" is recalled with its capitalisation intact. The file is plain JSON capped at ~100KB (oldest command history is trimmed first), saved atomically, and it lives in a directory the file skills refuse to read, so the assistant cannot read its own memory back to you through a path traversal.
