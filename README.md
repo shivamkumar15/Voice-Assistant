@@ -192,6 +192,4 @@ If you want to extend the assistant, the most likely extension points are:
 - `assistant/config.py` for environment-driven behavior
 - `assistant/gui.py` for the visual HUD
 
-## License
 
-This project does not currently include a license file. If you are using or distributing it, add a license explicitly before sharing it publicly.
