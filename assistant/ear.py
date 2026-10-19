@@ -340,7 +340,11 @@ def _ensure_sane_mic_gain():
     Many laptops boot with the boost at +30dB on top of +30dB capture gain,
     which drowns the microphone in electrical noise and makes speech
     recognition impossible. Driver defaults tend to reset this on every
-    reboot, so we enforce it at each startup (best effort, silent).
+    reboot (and PipeWire re-applies it whenever a stream reopens), so we
+    enforce it periodically.
+
+    Returns the card index that carries the control (needed for the separate
+    'Capture' gain trim), or None when no card has it.
     """
     for card in range(6):
         try:
@@ -349,14 +353,80 @@ def _ensure_sane_mic_gain():
                 capture_output=True, text=True, timeout=3,
             )
         except (OSError, subprocess.SubprocessError):
-            return
-        if probe.returncode != 0 or "30.00dB" not in probe.stdout:
-            continue
+            return None
+        if not probe.stdout:
+            continue  # no such control on this card; try the next
+        if "30.00dB" not in probe.stdout:
+            return card  # control exists; leave it be
         subprocess.run(
             ["amixer", "-c", str(card), "sset", "Internal Mic Boost", "0"],
             capture_output=True, timeout=3,
         )
         print("[ear] internal mic boost was maxed — toned it down for clean audio")
+        return card
+    return None
+
+
+def _capture_value(card: int) -> int | None:
+    """Current ALSA 'Capture' level on *card* as a percent-like index."""
+    try:
+        probe = subprocess.run(
+            ["amixer", "-c", str(card), "sget", "Capture"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"Capture\s+(\d+)\s+\[", probe.stdout)
+    return int(match.group(1)) if match else None
+
+
+def _set_capture(card: int, value: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["amixer", "-c", str(card), "sset", "Capture", str(value)],
+            capture_output=True, timeout=3,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+# Target band for the live noise-floor RMS. The good chain on this box is
+# boost=0 + capture=63, which floors around ~1500 with speech peaking ~8000
+# (5x separation). A maxed chain clips at ~25000 with no separation, and a
+# capture index below ~30 makes speech too faint for Whisper to decode.
+# So: bring a clipping floor DOWN, and anything quiet-ward back UP toward it.
+_GAIN_BAND_LOW = 900
+_GAIN_BAND_HIGH = 4000
+_GAIN_STEP_DOWN = 12
+_GAIN_STEP_UP = 8
+_CAPTURE_LEVEL_MIN = 8
+_CAPTURE_LEVEL_MAX = 63
+
+
+def _trim_capture_gain(card: int, floor_rms: float):
+    """Keep 'Capture' inside a band where speech clears the gate.
+
+    Zeroing the boost alone is not enough: PipeWire re-maxes it whenever a
+    capture stream reopens, and boost=3 + capture=63 clips the input to
+    32768 so the median-floor gate can never see speech above it. 'Capture'
+    is the stable lever, so drive it toward the band and both ends of the
+    boost flap stay workable.
+    """
+    if card is None or floor_rms <= 0:
+        return
+    current = _capture_value(card)
+    if current is None:
+        return
+    if floor_rms > _GAIN_BAND_HIGH:
+        new_value = max(_CAPTURE_LEVEL_MIN, current - _GAIN_STEP_DOWN)
+    elif floor_rms < _GAIN_BAND_LOW:
+        new_value = min(_CAPTURE_LEVEL_MAX, current + _GAIN_STEP_UP)
+    else:
+        return
+    if _set_capture(card, new_value):
+        print(f"[ear] capture gain {current} -> {new_value} "
+              f"(floor rms {floor_rms:.0f})")
 
 
 def _ensure_capture_volume():
@@ -520,6 +590,7 @@ class Ear:
         quiet_chunks_needed = max(1, int(0.6 / seconds_per_chunk))
         min_speech_chunks = max(1, int(0.3 / seconds_per_chunk))
         min_gate = 700  # never react to anything quieter than this
+        gain_card = _ensure_sane_mic_gain()
         last_gain_check = time.monotonic()
 
         while True:
@@ -527,10 +598,12 @@ class Ear:
                 time.sleep(0.05)
                 continue
             # PipeWire keeps re-restoring the ALSA boost on stream events;
-            # re-check periodically so the mic stays usable mid-session.
-            if time.monotonic() - last_gain_check > 30:
+            # re-check often enough to win back a clipped input chain fast.
+            if time.monotonic() - last_gain_check > 5:
                 last_gain_check = time.monotonic()
-                _ensure_sane_mic_gain()
+                gain_card = _ensure_sane_mic_gain() or gain_card
+                if len(history) >= 20:
+                    _trim_capture_gain(gain_card, statistics.median(history))
             try:
                 data = source.stream.read(chunk)
             except Exception as exc:
