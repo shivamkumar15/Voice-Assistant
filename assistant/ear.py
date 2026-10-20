@@ -397,7 +397,12 @@ def _set_capture(card: int, value: int) -> bool:
 # capture index below ~30 makes speech too faint for Whisper to decode.
 # So: bring a clipping floor DOWN, and anything quiet-ward back UP toward it.
 _GAIN_BAND_LOW = 900
-_GAIN_BAND_HIGH = 4000
+_GAIN_BAND_HIGH = 6000
+# When the chain is clipping, stepping 12 at a time wanders through
+# intermediate poppy levels for 40s before landing anywhere useful. Jump
+# straight to a measured-good value instead: capture=25 held a clean floor
+# (~2265) with speech peaking ~12900 even while the boost was re-maxed.
+_GAIN_COOL_VALUE = 25
 _GAIN_STEP_DOWN = 12
 _GAIN_STEP_UP = 8
 _CAPTURE_LEVEL_MIN = 8
@@ -419,7 +424,8 @@ def _trim_capture_gain(card: int, floor_rms: float):
     if current is None:
         return
     if floor_rms > _GAIN_BAND_HIGH:
-        new_value = max(_CAPTURE_LEVEL_MIN, current - _GAIN_STEP_DOWN)
+        # Clipping chain: one decisive jump, not a walk.
+        new_value = _GAIN_COOL_VALUE
     elif floor_rms < _GAIN_BAND_LOW:
         new_value = min(_CAPTURE_LEVEL_MAX, current + _GAIN_STEP_UP)
     else:
@@ -427,6 +433,10 @@ def _trim_capture_gain(card: int, floor_rms: float):
     if _set_capture(card, new_value):
         print(f"[ear] capture gain {current} -> {new_value} "
               f"(floor rms {floor_rms:.0f})")
+        # A hot wall is usually accompanyed by a re-maxed boost, so reset it
+        # in the same breath instead of waiting for the next 5s cycle.
+        if new_value <= _GAIN_COOL_VALUE:
+            _ensure_sane_mic_gain()
 
 
 def _ensure_capture_volume():
@@ -584,10 +594,12 @@ class Ear:
         seconds_per_chunk = chunk / rate
         # Recent noise-floor history (~8 s). Median, so bursts don't count.
         history = collections.deque(maxlen=max(60, int(8 / seconds_per_chunk)))
-        # Pre-roll: keep the last ~0.4 s of audio so the first syllable
-        # ("work-" in "workspace") isn't clipped when the gate triggers late.
-        preroll = collections.deque(maxlen=max(1, int(0.4 / seconds_per_chunk)))
-        quiet_chunks_needed = max(1, int(0.6 / seconds_per_chunk))
+        # Pre-roll: keep the last ~0.7 s of audio so the first syllable
+        # ("vol-" in "volume up") isn't clipped when the gate triggers late.
+        # 0.4s was measured eating the start of short commands on a real mic,
+        # turning them into something Whisper had to guess from the tail.
+        preroll = collections.deque(maxlen=max(1, int(0.7 / seconds_per_chunk)))
+        quiet_chunks_needed = max(1, int(0.8 / seconds_per_chunk))
         min_speech_chunks = max(1, int(0.3 / seconds_per_chunk))
         min_gate = 700  # never react to anything quieter than this
         gain_card = _ensure_sane_mic_gain()
