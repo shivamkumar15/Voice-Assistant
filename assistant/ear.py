@@ -36,6 +36,8 @@ import time
 
 from .config import (
     MIC_DEVICE_INDEX,
+    MIC_GATE_FACTOR,
+    MIC_MIN_GATE,
     PHRASE_TIME_LIMIT,
     STT_LANGUAGE,
     STT_PROVIDER,
@@ -58,6 +60,9 @@ _COMMAND_KEYWORDS = (
     "files", "folder", "directory", "pdf", "document", "summarize", "summary",
     "study", "plan", "git", "code", "monitor", "screen", "email", "form",
 )
+
+
+_DEBUG = os.getenv("EAR_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _rms(data: bytes, width: int) -> int:
@@ -219,6 +224,9 @@ class WhisperEngine:
                                   or "auto").lower()
         self._model = None
         self.device = None
+        # The warm-up thread and the first real phrase can call load() at the
+        # same time; without this both would build a full model copy.
+        self._load_lock = threading.Lock()
 
     def _build(self, device: str, compute_type: str):
         """Load the model on *device* and prove it can run an encode.
@@ -248,7 +256,12 @@ class WhisperEngine:
         """Build the model, downloading it on first run. Idempotent."""
         if self._model is not None:
             return self._model
+        with self._load_lock:
+            if self._model is not None:
+                return self._model
+            return self._load_locked()
 
+    def _load_locked(self):
         started = time.monotonic()
         attempts = []
         if self.requested_device == "auto":
@@ -430,6 +443,8 @@ def _trim_capture_gain(card: int, floor_rms: float):
         new_value = min(_CAPTURE_LEVEL_MAX, current + _GAIN_STEP_UP)
     else:
         return
+    if new_value == current:
+        return  # already at the end of the usable range
     if _set_capture(card, new_value):
         print(f"[ear] capture gain {current} -> {new_value} "
               f"(floor rms {floor_rms:.0f})")
@@ -601,7 +616,13 @@ class Ear:
         preroll = collections.deque(maxlen=max(1, int(0.7 / seconds_per_chunk)))
         quiet_chunks_needed = max(1, int(0.8 / seconds_per_chunk))
         min_speech_chunks = max(1, int(0.3 / seconds_per_chunk))
-        min_gate = 700  # never react to anything quieter than this
+        min_gate = MIC_MIN_GATE  # never react to anything quieter than this
+        gate_factor = MIC_GATE_FACTOR
+        # Require the gate to stay crossed for a second chunk: single spikes
+        # (a tap on the desk, a speaker pop) are not speech, and each false
+        # trigger would otherwise cost a Whisper run.
+        attack_chunks = 2
+        above_run = 0
         gain_card = _ensure_sane_mic_gain()
         last_gain_check = time.monotonic()
 
@@ -628,9 +649,16 @@ class Ear:
             self._push_audio_level(level)
             history.append(level)
             preroll.append(data)
-            gate = max(statistics.median(history) * 2.5, min_gate)
+            gate = max(statistics.median(history) * gate_factor, min_gate)
             if level < gate:
+                above_run = 0
                 continue
+            above_run += 1
+            if above_run < attack_chunks:
+                continue
+            above_run = 0
+            if _DEBUG:
+                print(f"[ear] speech detected (rms {level}, gate {gate:.0f})")
 
             # Speech started — record until ~0.6 s of quiet or the phrase cap.
             # Prepend the pre-roll so clipped first syllables survive.
@@ -671,6 +699,8 @@ class Ear:
                 continue
             self._service_error_reported = False
             text = text.strip()
+            if _DEBUG:
+                print(f"[ear] phrase {len(frames)} chunks -> {text!r}")
             if text:
                 print(f"You: {text}")
                 self.phrases.put(text)

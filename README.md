@@ -100,7 +100,60 @@ Notes:
 - GPU use needs `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` on some setups. The startup line says which device it actually chose; if the GPU probe fails it silently falls back to CPU `int8`, which is still faster than real time for short commands.
 - If `faster-whisper` is not installed, or the model cannot be loaded, the assistant falls back to the keyless Google endpoint and says so in the terminal.
 
+### Microphone troubleshooting
+
+If the HUD shows levels but no command ever appears, run `EAR_DEBUG=1 python ninja.py`
+and watch the terminal. Every detected phrase prints `speech detected (rms …,
+gate …)` followed by the transcript, which tells you whether the gate, the
+capture level, or the recogniser is the problem.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `EAR_DEBUG` | off | Print gate crossings and transcripts (also prints empty ones) |
+| `MIC_GATE_FACTOR` | `1.8` | How far above the noise floor a chunk must be to count as speech. Raise to `2.5` if background noise keeps triggering, lower to `1.4` for a quiet voice |
+| `MIC_MIN_GATE` | `700` | Absolute floor so a silent room cannot trigger on clicks |
+
+The usual cause of "it can't hear me" is audio playing through the laptop
+speakers: the microphone hears the music/video, the noise floor rises, and
+your voice no longer clears the gate. Use headphones, turn the media down, or
+raise `MIC_GATE_FACTOR`. There is no echo cancellation in the capture path.
+
+The assistant raises a muted/quiet PulseAudio source to 100% when the stream
+opens, but it leaves a deliberately lowered level alone after that.
+
+### AI brain
+
+Anything that isn't a local command is answered by an AI model through the
+local `opencode` CLI, so there is no API key to configure:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SPARK_PROVIDER` | `auto` | `opencode` (free CLI), `openrouter`, or `auto` |
+| `OPENCODE_MODEL` | `opencode/deepseek-v4.1-flash-free` | Any id from `opencode models` |
+| `OPENCODE_VARIANT` | blank | Optional variant, sent as `model#variant` |
+| `OPENCODE_RUN_TIMEOUT` | `180` | Seconds before a CLI answer is abandoned |
+| `OPENROUTER_MODEL` | `meta/muse-spark-1.3` | Used only with `SPARK_PROVIDER=openrouter` |
+
+If the AI never answers, run `opencode models` and pick a model your account
+can actually use with `OPENCODE_MODEL`. A paid model on a free account fails
+with `Insufficient account funds`; the assistant prints that error and falls
+back to the local Needle brain.
+
 ## Running the Assistant
+
+The easiest launch uses the project virtualenv:
+
+```bash
+./run.sh                 # GUI + continuous listening
+./run.sh --wake-word     # only respond after "Ninja"
+./run.sh --no-gui        # voice mode in the terminal
+./run.sh --text          # type commands instead of speaking
+```
+
+`run.sh` only forwards to `.venv/bin/python ninja.py`, so the flags below work
+either way. Running `python ninja.py` with the system Python starts the
+assistant but has no microphone dependencies — it prints `microphone
+unavailable` and silently becomes a text-only app.
 
 Default GUI mode with continuous listening:
 
@@ -168,7 +221,7 @@ Anything you tell it to remember is kept in `~/.local/share/ninja-assistant/memo
 
 Facts it can put a name to are stored as preferences instead, so "remember that my dentist is Dr Rao" is recalled with its capitalisation intact. The file is plain JSON capped at ~100KB (oldest command history is trimmed first), saved atomically, and it lives in a directory the file skills refuse to read, so the assistant cannot read its own memory back to you through a path traversal.
 
-The AI layer (Muse Spark 1.3) reads the same profile: your name, city, favorites, preferences, facts and nicknames are injected into every AI answer, so the assistant addresses you by name and uses what it knows even days later. The AI conversation itself is persisted to `spark-history.json`, so it picks up where it left off after a restart ("clear chat history" resets it).
+The AI layer (DeepSeek V4.1 Flash by default; change it with `OPENCODE_MODEL`) reads the same profile: your name, city, favorites, preferences, facts and nicknames are injected into every AI answer, so the assistant addresses you by name and uses what it knows even days later. The AI conversation itself is persisted to `spark-history.json`, so it picks up where it left off after a restart ("clear chat history" resets it).
 
 ## Notes
 

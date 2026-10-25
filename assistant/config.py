@@ -63,6 +63,15 @@ PHRASE_TIME_LIMIT = 8
 LISTEN_TIMEOUT = 6
 FOLLOWUP_TIMEOUT = 12
 
+# Speech gate in ear.py: a chunk counts as speech when its RMS is this many
+# times the recent median noise floor. 2.5 was too strict on laptops whose
+# mic floor is already high (fans, media playing through the speakers) —
+# speech peaked below the gate and the assistant looked deaf. Raise it if
+# background media keeps triggering false phrases; lower it if you have to
+# shout.
+MIC_GATE_FACTOR = max(1.1, float(os.getenv("MIC_GATE_FACTOR", "1.8")))
+MIC_MIN_GATE = max(100, int(os.getenv("MIC_MIN_GATE", "700")))
+
 # Speech-to-text language (e.g. "en-US", "en-IN", "en-PH"). If the assistant
 # constantly mishears accented words, set this to your English variant — it
 # makes a big difference for words like "workspace". Google uses the full
@@ -132,18 +141,20 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 SPARK_PROVIDER = os.getenv("SPARK_PROVIDER", "auto").strip().lower()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta/muse-spark-1.3")
 
-# Free tier: Muse Spark 1.3 Contributor (Meta may use prompts/completions
-# to train future models). It is locked to "within OpenCode" use, so Ninja
-# shells out to the local `opencode run` CLI — no API key needed, just
-# `opencode` installed + logged in (same setup this repo's opencode uses).
+# Free tier: Ninja shells out to the local `opencode run` CLI — no API key
+# needed, just `opencode` installed + logged in (same setup this repo's
+# opencode uses). Pick any id from `opencode models`; a model the account
+# cannot access fails with "Insufficient account funds" at call time.
 OPENCODE_MODEL = os.getenv(
-    "OPENCODE_MODEL", "opencode/muse-spark-1.3-contributor-free")
+    "OPENCODE_MODEL", "opencode/deepseek-v4.1-flash-free")
 OPENCODE_BIN = os.getenv("OPENCODE_BIN", "opencode")
 OPENCODE_RUN_DIR = Path(os.getenv(
     "OPENCODE_RUN_DIR",
     str(Path.home() / ".local" / "share" / "ninja-assistant" / "opencode-run"),
 ))
-OPENCODE_VARIANT = os.getenv("OPENCODE_VARIANT", "minimal")  # reasoning effort
+# Optional reasoning variant, appended as model#variant (OpenCode CLI v2
+# syntax). Blank by default: most free models expose no variants.
+OPENCODE_VARIANT = os.getenv("OPENCODE_VARIANT", "")
 OPENCODE_RUN_TIMEOUT = int(os.getenv("OPENCODE_RUN_TIMEOUT", "180"))
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 

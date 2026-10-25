@@ -482,15 +482,21 @@ class SparkBrain:
             OPENCODE_RUN_DIR.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise RuntimeError(f"Couldn't prepare opencode run dir ({exc})")
+        # OpenCode CLI v2: `--pure`, `--variant` and `--dir` were removed;
+        # the working directory comes from cwd and a reasoning effort is
+        # appended to the model id as provider/model#variant.
+        model = OPENCODE_MODEL
+        variant = (OPENCODE_VARIANT or "").strip()
+        if variant and "#" not in model:
+            model = f"{model}#{variant}"
         t0 = time.monotonic()
         try:
             proc = subprocess.run(
-                [OPENCODE_BIN, "run", "--pure",
-                 "--model", OPENCODE_MODEL,
-                 "--variant", OPENCODE_VARIANT,
-                 "--dir", str(OPENCODE_RUN_DIR),
+                [OPENCODE_BIN, "run",
+                 "--model", model,
                  self._opencode_message(prompt)],
                 capture_output=True, text=True,
+                cwd=str(OPENCODE_RUN_DIR),
                 timeout=max(30, OPENCODE_RUN_TIMEOUT),
             )
         except FileNotFoundError:
@@ -825,9 +831,11 @@ class SparkBrain:
             hist += (f", {facts} long-term fact{'s' if facts != 1 else ''} "
                      "about you")
         if provider == "opencode":
+            variant = (OPENCODE_VARIANT or "").strip()
+            variant_note = f", variant {variant}" if variant else ""
             return (
-                f"Muse Spark 1.3 free via OpenCode CLI ({OPENCODE_MODEL}, "
-                f"variant {OPENCODE_VARIANT}, {hist})."
+                f"AI brain via the OpenCode CLI ({OPENCODE_MODEL}"
+                f"{variant_note}, {hist})."
             )
         tools = "with tools" if SPARK_TOOLS_ENABLED else "chat only"
         return (
