@@ -473,16 +473,23 @@ def _text_from_payload(payload) -> str:
 
 
 def _openwhispr_text(stdout: str) -> str:
-    """Pull the transcript out of `openwhispr transcribe --format json`."""
+    """Pull the transcript out of `openwhispr transcribe --format json`.
+
+    A JSON response with an empty `text` means the app heard nothing (it says
+    so in a `warning` field) and must stay empty — returning the raw body there
+    would hand the brain a blob of JSON as if it were speech.
+    """
     raw = (stdout or "").strip()
     if not raw:
         return ""
+    saw_json = False
     try:
-        text = _text_from_payload(json.loads(raw))
+        payload = json.loads(raw)
+        saw_json = True
     except ValueError:
-        text = ""
-    if text:
-        return text
+        payload = None
+    if saw_json:
+        return _text_from_payload(payload)
     # Some CLI builds print a progress or warning line before the JSON body,
     # which breaks a whole-output parse. Scan from the bottom for the response
     # instead of giving up and handing the caller diagnostic noise as speech.
@@ -491,11 +498,15 @@ def _openwhispr_text(stdout: str) -> str:
         if not line.startswith(("{", "[")):
             continue
         try:
-            text = _text_from_payload(json.loads(line))
+            parsed = json.loads(line)
         except ValueError:
             continue
+        saw_json = True
+        text = _text_from_payload(parsed)
         if text:
             return text
+    if saw_json:
+        return ""  # the response carried no transcript: nothing was said
     # No JSON anywhere: this is `--format text` output (or a human summary).
     return raw
 
