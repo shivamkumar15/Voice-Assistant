@@ -7,7 +7,7 @@ This project is centered around `ninja.py`, which runs the assistant in GUI, ter
 ## Features
 
 - Voice command processing with wake-word or continuous listening modes
-- Local offline speech recognition with OpenAI Whisper (`faster-whisper`), no API key
+- Local offline speech recognition with OpenAI Whisper (`faster-whisper`) or the OpenWhispr CLI, no API key required
 - App launching and window management
 - Browser automation for web pages and searches
 - Mouse and keyboard control
@@ -82,12 +82,13 @@ You can also place these values into a `.env` file in the project root. `WAKE_WO
 ### Speech recognition
 
 Voice input uses OpenAI Whisper running locally through `faster-whisper`
-(CTranslate2). Audio never leaves the machine, no API key is needed, and it
-handles accents and jargon better than a keyless cloud endpoint.
+(CTranslate2), or the OpenWhispr CLI when it is installed (`STT_PROVIDER=auto`
+prefers OpenWhispr). Audio never leaves the machine, no API key is needed, and
+it handles accents and jargon better than a keyless cloud endpoint.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `STT_PROVIDER` | `auto` | `whisper` (local), `google` (cloud fallback), or `auto` to use Whisper when installed |
+| `STT_PROVIDER` | `auto` | `openwhispr` (OpenWhispr CLI), `whisper` (local `faster-whisper`), `google` (cloud fallback), or `auto` to use OpenWhispr when its CLI is installed, else Whisper, else Google |
 | `STT_WHISPER_MODEL` | `base.en` | `tiny.en` / `base.en` / `small.en` / `medium.en` / `large-v3`, or a path to a downloaded model |
 | `STT_WHISPER_DEVICE` | `auto` | `auto` uses a GPU when one works, else CPU. Force `cpu` to skip the probe |
 | `STT_WHISPER_BEAMS` | `5` | Beam width. `1` is fastest, `5` is more accurate |
@@ -99,6 +100,35 @@ Notes:
 - `base.en` is the default for a reason: on short commands it matched `small.en` while running about 3x faster, and the larger model occasionally spoke a primed hotword that was never said. Raise to `small.en` only if you use long or unusual vocabulary.
 - GPU use needs `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` on some setups. The startup line says which device it actually chose; if the GPU probe fails it silently falls back to CPU `int8`, which is still faster than real time for short commands.
 - If `faster-whisper` is not installed, or the model cannot be loaded, the assistant falls back to the keyless Google endpoint and says so in the terminal.
+
+### OpenWhispr
+
+[OpenWhispr](https://openwhispr.com) is an open-source dictation app that keeps
+its Whisper and Parakeet models inside the desktop app, so there is no Python
+API to call. The assistant therefore goes through its CLI: each spoken phrase
+is written to a temporary WAV and handed to `openwhispr transcribe`.
+
+```bash
+npm install -g @openwhispr/cli      # 0.3.0 or newer
+openwhispr doctor                   # confirms the app is reachable
+```
+
+The OpenWhispr desktop app must be installed, running, and have a local model
+downloaded — the CLI transcribes through the running app. That is one process
+launch and one IPC round trip per phrase, which is slower than `faster-whisper`
+in-process, so `STT_PROVIDER=whisper` remains the faster option. At startup the
+assistant runs `openwhispr doctor` and falls back to local Whisper (or Google)
+if no backend answers, so a stopped app never turns into a deaf assistant.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `STT_OPENWHISPER_BIN` | `openwhispr` | Path or name of the CLI binary |
+| `STT_OPENWHISPER_MODEL` | blank | Local model id to use instead of the app's current one |
+| `STT_OPENWHISPER_REMOTE` | `0` | `1` sends audio to OpenWhispr Cloud instead of the local app (Pro/Business plan and an API key are required) |
+| `STT_OPENWHISPER_TIMEOUT` | `20` | Seconds before a phrase's CLI call is abandoned |
+
+Set `STT_PROVIDER=openwhispr` to ask for it explicitly; the startup check still
+falls back if no backend answers, so the assistant keeps listening either way.
 
 ### Microphone troubleshooting
 

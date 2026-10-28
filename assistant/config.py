@@ -82,8 +82,9 @@ STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en-US")
 # OpenAI Whisper running fully on-device: no API key, no audio leaves the
 # machine, and it hears accents, jargon and "workspace"-style words far more
 # reliably than the keyless Google endpoint.
-# "auto" (default): Whisper when faster-whisper is installed, else Google.
-# "whisper": Whisper only. "google": Google Web Speech only.
+# "auto" (default): OpenWhispr when its CLI is installed, else local Whisper,
+# else Google. "openwhispr": the OpenWhispr CLI. "whisper": Whisper only.
+# "google": Google Web Speech only.
 STT_PROVIDER = os.getenv("STT_PROVIDER", "auto").strip().lower()
 # Size name from faster-whisper: tiny.en / base.en / small.en / medium.en /
 # large-v3, or an absolute path to a downloaded model. base.en is the
@@ -115,6 +116,23 @@ STT_WHISPER_MODEL_DIR = Path(os.getenv(
     "STT_WHISPER_MODEL_DIR",
     str(Path.home() / ".cache" / "ninja-assistant" / "whisper"),
 ))
+
+# --- OpenWhispr (openwhispr.com) -------------------------------------------
+# OpenWhispr keeps its Whisper/Parakeet models inside the desktop app, so the
+# only way in from Python is its CLI (`npm install -g @openwhispr/cli`, 0.3.0+).
+# Default path is local: the CLI hands the audio to the running app, which
+# transcribes on-device for free and offline. --remote uploads to OpenWhispr
+# Cloud instead, which needs a Pro/Business plan and an API key.
+STT_OPENWHISPER_BIN = os.getenv("STT_OPENWHISPER_BIN", "openwhispr")
+# Local model id to use instead of the one the app has selected. Blank keeps
+# the app's current model; wrong ids are rejected with the list of choices.
+STT_OPENWHISPER_MODEL = os.getenv("STT_OPENWHISPER_MODEL", "").strip()
+# 1 = send audio to OpenWhispr Cloud (paid) instead of the local app.
+STT_OPENWHISPER_REMOTE = os.getenv("STT_OPENWHISPER_REMOTE", "0").lower() in (
+    "1", "true", "yes", "on",
+)
+# One CLI run per spoken phrase, so this covers process start, IPC and decode.
+STT_OPENWHISPER_TIMEOUT = max(1, int(os.getenv("STT_OPENWHISPER_TIMEOUT", "20")))
 
 
 BROWSER_CANDIDATES = {

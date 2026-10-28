@@ -7,11 +7,12 @@ SpeechRecognition dynamic threshold: laptop mics produce short loud bursts
 (fan spin-up, EMI) that the stock threshold chases upward, leaving the
 assistant deaf. A median floor over recent history ignores bursts.
 
-Transcription itself is pluggable. The default runs OpenAI Whisper locally via
-faster-whisper (STT_PROVIDER=auto): it is fully offline, needs no API key, and
-beats the keyless Google endpoint on accents and jargon. Google Web Speech
-stays wired in as a fallback so a missing package or a failed model load
-degrades to "still listens" rather than "no mic".
+Transcription itself is pluggable. STT_PROVIDER=auto prefers the OpenWhispr
+CLI when it is installed (its models live inside the desktop app, so each
+phrase is handed to `openwhispr transcribe`), then OpenAI Whisper running
+locally via faster-whisper, then the keyless Google endpoint. Google Web
+Speech stays wired in as a last resort so a missing package or a failed model
+load degrades to "still listens" rather than "no mic".
 """
 
 try:
@@ -22,11 +23,14 @@ except ModuleNotFoundError:
 import collections
 import contextlib
 import io
+import json
 import math
 import os
 import queue
 import re
+import shutil
 import statistics
+import tempfile
 import wave
 from array import array
 import subprocess
@@ -40,6 +44,10 @@ from .config import (
     MIC_MIN_GATE,
     PHRASE_TIME_LIMIT,
     STT_LANGUAGE,
+    STT_OPENWHISPER_BIN,
+    STT_OPENWHISPER_MODEL,
+    STT_OPENWHISPER_REMOTE,
+    STT_OPENWHISPER_TIMEOUT,
     STT_PROVIDER,
     STT_WHISPER_BEAMS,
     STT_WHISPER_COMPUTE_TYPE,
@@ -113,6 +121,7 @@ def _pick_transcript(result) -> str:
 # --- Speech-to-text provider ------------------------------------------------
 
 _whisper_importable = None
+_openwhispr_path = None
 
 
 def whisper_available() -> bool:
@@ -127,20 +136,34 @@ def whisper_available() -> bool:
     return _whisper_importable
 
 
+def openwhispr_available() -> bool:
+    """True when the OpenWhispr CLI is on PATH.
+
+    The models themselves live inside the desktop app, so the CLI being
+    installed is necessary but not sufficient — check() proves the backend
+    answers before the first phrase is charged to it.
+    """
+    global _openwhispr_path
+    if _openwhispr_path is None:
+        _openwhispr_path = shutil.which(STT_OPENWHISPER_BIN) or ""
+    return bool(_openwhispr_path)
+
+
 def resolve_stt_provider() -> str:
-    """'whisper' or 'google' per STT_PROVIDER (auto prefers local Whisper)."""
+    """Pick the recogniser per STT_PROVIDER (auto prefers OpenWhispr)."""
     want = (STT_PROVIDER or "auto").strip().lower()
-    if want == "whisper":
-        return "whisper"
-    if want == "google":
-        return "google"
+    if want in ("openwhispr", "whisper", "google"):
+        return want
+    if openwhispr_available():
+        return "openwhispr"
     return "whisper" if whisper_available() else "google"
 
 
-def _whisper_language():
-    """Our BCP-47 STT_LANGUAGE ('en-US') as Whisper's ISO-639-1 ('en').
+def _language_code():
+    """Our BCP-47 STT_LANGUAGE ('en-US') as the plain code engines want ('en').
 
-    None lets Whisper detect the language itself.
+    Both Whisper and `openwhispr transcribe --language` take the bare ISO-639-1
+    form. None lets the engine detect the language itself.
     """
     code = (STT_LANGUAGE or "en").strip().lower()
     if not code or code == "auto":
@@ -305,7 +328,7 @@ class WhisperEngine:
         model = self.load()
         segments, _info = model.transcribe(
             io.BytesIO(wav),
-            language=_whisper_language(),
+            language=_language_code(),
             beam_size=STT_WHISPER_BEAMS,
             # Silero VAD inside Whisper trims the leading/trailing silence our
             # own gate left in, and is the main defence against Whisper
@@ -330,6 +353,151 @@ class WhisperEngine:
         # what actually runs inference, so exceptions surface inside the caller's
         # try/except rather than at an unrelated point later.
         return " ".join(segment.text.strip() for segment in segments).strip()
+
+
+class OpenWhisprEngine:
+    """Speech-to-text through the OpenWhispr CLI (`openwhispr transcribe`).
+
+    OpenWhispr keeps its Whisper/Parakeet models inside the Electron app, so
+    there is no Python API to call: the CLI is the supported entry point. It
+    hands the file to the running app over its local bridge — free, offline,
+    and on whatever model the app has selected — or, when STT_OPENWHISPER_REMOTE
+    is set, uploads it to OpenWhispr Cloud (paid plan + API key).
+
+    The cost of going through a process is one `openwhispr` exec per spoken
+    phrase, plus IPC and decode inside the app.
+    """
+
+    def __init__(self, binary=None, model=None):
+        self.binary = binary or STT_OPENWHISPER_BIN
+        self.model = model if model is not None else STT_OPENWHISPER_MODEL
+        self.timeout = STT_OPENWHISPER_TIMEOUT
+
+    def _command(self, wav_path: str):
+        """Build the CLI call. Global flags (`--remote`) go before the noun."""
+        command = [self.binary]
+        if STT_OPENWHISPER_REMOTE:
+            command.append("--remote")
+        command += ["transcribe", wav_path, "--format", "json"]
+        if self.model:
+            command += ["--model", self.model]
+        language = _language_code()
+        if language:
+            command += ["--language", language]
+        return command
+
+    def check(self):
+        """Prove a backend answers before the first phrase pays for it.
+
+        `openwhispr doctor` reports whether the desktop app (or the cloud API)
+        is reachable, so a stopped app surfaces at startup instead of as a
+        missing transcript mid-sentence.
+        """
+        try:
+            result = subprocess.run(
+                [self.binary, "doctor"], capture_output=True, text=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"could not run {self.binary} ({exc})") from exc
+        if result.returncode != 0:
+            detail = _first_line(result.stderr) or _first_line(result.stdout)
+            hint = "is the OpenWhispr desktop app running?"
+            if result.returncode == 3:
+                hint = ("API key missing or lacks transcriptions:write "
+                        "(openwhispr auth login)")
+            raise RuntimeError(f"no reachable backend — {hint}"
+                               + (f" [{detail}]" if detail else ""))
+        return True
+
+    def transcribe(self, wav: bytes) -> str:
+        """Transcribe a mono WAV blob to text. '' means nothing intelligible.
+
+        The CLI only reads files, so the in-memory phrase is spilled to a temp
+        .wav and removed again; nothing is left behind on disk.
+        """
+        handle, path = tempfile.mkstemp(prefix="ninja-", suffix=".wav")
+        try:
+            with os.fdopen(handle, "wb") as out:
+                out.write(wav)
+            try:
+                result = subprocess.run(
+                    self._command(path), capture_output=True, text=True,
+                    timeout=self.timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"openwhispr timed out after {self.timeout}s") from exc
+            if result.returncode != 0:
+                detail = _first_line(result.stderr) or _first_line(result.stdout)
+                raise RuntimeError(
+                    f"openwhispr exited {result.returncode}"
+                    + (f": {detail}" if detail else ""))
+            return _openwhispr_text(result.stdout)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _first_line(text: str) -> str:
+    """First non-blank line of CLI output, for one-line error messages."""
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+# Field names `openwhispr transcribe --format json` might use for the text.
+# The response shape is documented only loosely, so accept the plausible keys
+# and fall back to treating stdout as plain text if the JSON says something
+# else entirely.
+_OPENWHISPR_TEXT_KEYS = ("transcript", "text", "result", "content")
+
+
+def _text_from_payload(payload) -> str:
+    """Transcript text from a decoded response, or '' if it carries none."""
+    if isinstance(payload, list):
+        parts = [_text_from_payload(item) for item in payload]
+        return " ".join(part for part in parts if part).strip()
+    if not isinstance(payload, dict):
+        return ""
+    for candidate in (payload, payload.get("data")):
+        if not isinstance(candidate, dict):
+            continue
+        for key in _OPENWHISPR_TEXT_KEYS:
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _openwhispr_text(stdout: str) -> str:
+    """Pull the transcript out of `openwhispr transcribe --format json`."""
+    raw = (stdout or "").strip()
+    if not raw:
+        return ""
+    try:
+        text = _text_from_payload(json.loads(raw))
+    except ValueError:
+        text = ""
+    if text:
+        return text
+    # Some CLI builds print a progress or warning line before the JSON body,
+    # which breaks a whole-output parse. Scan from the bottom for the response
+    # instead of giving up and handing the caller diagnostic noise as speech.
+    for line in reversed(raw.splitlines()):
+        line = line.strip()
+        if not line.startswith(("{", "[")):
+            continue
+        try:
+            text = _text_from_payload(json.loads(line))
+        except ValueError:
+            continue
+        if text:
+            return text
+    # No JSON anywhere: this is `--format text` output (or a human summary).
+    return raw
 
 
 @contextlib.contextmanager
@@ -484,6 +652,8 @@ class Ear:
         self._service_error_reported = False
         self.provider = resolve_stt_provider()
         self.whisper = WhisperEngine() if self.provider == "whisper" else None
+        self.openwhispr = (OpenWhisprEngine()
+                          if self.provider == "openwhispr" else None)
         # Serialises the single recogniser, and is held while the listener is
         # paused so a phrase never records over the assistant's own voice.
         self._stt_lock = threading.RLock()
@@ -532,11 +702,14 @@ class Ear:
         with _silence_c_stderr():
             source = microphone.__enter__()
 
-        # Warm the model up off-thread: the first load downloads and
-        # initialises weights, which would otherwise be charged to whichever
-        # phrase happens to arrive first.
+        # Warm the recogniser up off-thread: the first Whisper load downloads
+        # and initialises weights, and the OpenWhispr CLI needs its desktop app
+        # reachable. Either would otherwise be charged to whichever phrase
+        # happens to arrive first.
         if self.whisper is not None:
             threading.Thread(target=self._warm_whisper, daemon=True).start()
+        elif self.openwhispr is not None:
+            threading.Thread(target=self._warm_openwhispr, daemon=True).start()
 
         worker = threading.Thread(
             target=self._listen_loop,
@@ -571,6 +744,31 @@ class Ear:
             self.provider = "google"
             self.whisper = None
 
+    def _warm_openwhispr(self):
+        """Confirm the CLI has a reachable backend, else use a local engine.
+
+        Without this, a stopped desktop app turns every phrase into a failed
+        subprocess and the assistant looks deaf, which is exactly the failure
+        this provider is supposed to avoid.
+        """
+        try:
+            self.openwhispr.check()
+            model = STT_OPENWHISPER_MODEL or "the app's model"
+            print(f"[ear] openwhispr ready ({model}, "
+                  f"{'cloud' if STT_OPENWHISPER_REMOTE else 'local'} backend)")
+            return
+        except Exception as exc:
+            print(f"[ear] openwhispr unavailable ({exc}) — falling back")
+        self.openwhispr = None
+        if whisper_available():
+            self.provider = "whisper"
+            self.whisper = WhisperEngine()
+            print("[ear] using local Whisper instead")
+            self._warm_whisper()
+        else:
+            self.provider = "google"
+            print("[ear] using Google Web Speech instead")
+
     def _transcribe_serialised(self, recognizer, frames, rate, width) -> str:
         """Run _transcribe under a lock shared with self-pausing.
 
@@ -592,6 +790,8 @@ class Ear:
 
         if self.provider == "whisper":
             return self.whisper.transcribe(_wav_bytes(frames, rate, width))
+        if self.provider == "openwhispr":
+            return self.openwhispr.transcribe(_wav_bytes(frames, rate, width))
 
         # show_all=True returns every guess; _pick_transcript keeps the one
         # that looks most like a real command.
