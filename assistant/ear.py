@@ -633,27 +633,105 @@ def _trim_capture_gain(card: int, floor_rms: float):
             _ensure_sane_mic_gain()
 
 
-def _ensure_capture_volume():
-    """Raise a near-muted default source.
+# PipeWire's source volume is cubic: 12% is about -55 dB, which leaves a
+# perfectly good microphone almost silent, while 100% can turn the same input
+# into a wall of hiss whose noise floor sits above any gate a recogniser can
+# use. On the laptop this was tuned against, 100% produced a floor around
+# 22000 RMS with clipping peaks, so max(1.8 * floor, 700) could never be
+# crossed and the assistant went completely deaf. Stay in the middle and let
+# the measured floor decide, rather than treating every low slider as broken.
+_SOURCE_FLOOR_LOW = 400       # below this the input is too faint for speech
+_SOURCE_FLOOR_HIGH = 3500     # above this the noise starts drowning speech
+_SOURCE_FLOOR_CLIP = 8000     # clearly clipping: jump straight to a safe value
+_SOURCE_VOLUME_MIN = 10
+_SOURCE_VOLUME_MAX = 100
+_SOURCE_VOLUME_STEP = 8
+_SOURCE_VOLUME_COOL = 30
+_SOURCE_VOLUME_START = 35
 
-    PipeWire may restore stale device volumes when capture streams reopen,
-    leaving the microphone effectively deaf. Recognition needs a usable
-    level, so bring anything below 60% back up (best effort, silent).
-    """
+
+def _source_volume() -> int | None:
+    """Current default-source volume as a percentage, or None if unknown."""
     try:
         probe = subprocess.run(
             ["pactl", "get-source-volume", "@DEFAULT_SOURCE@"],
             capture_output=True, text=True, timeout=3,
         )
-        match = re.search(r"/\s*(\d+)%", probe.stdout)
-        if match and int(match.group(1)) < 60:
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"/\s*(\d+)%", probe.stdout)
+    return int(match.group(1)) if match else None
+
+
+def _set_source_volume(value: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["pactl", "set-source-volume", "@DEFAULT_SOURCE@", f"{value}%"],
+            capture_output=True, timeout=3,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _ensure_capture_volume():
+    """Unmute a muted source, and lift only a genuinely near-silent one.
+
+    PipeWire may restore stale device volumes when capture streams reopen,
+    leaving the microphone effectively deaf. Earlier this function forced
+    anything below 60% up to 100%, which on a noisy laptop mic raised the
+    noise floor above the speech gate and made the assistant deaf in the
+    other direction. The listen loop now measures the floor and trims the
+    volume into a usable band; this only handles the "muted / nearly zero"
+    case before the first phrase.
+    """
+    try:
+        probe = subprocess.run(
+            ["pactl", "get-source-mute", "@DEFAULT_SOURCE@"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if re.search(r"\byes\b", probe.stdout or "", re.IGNORECASE):
             subprocess.run(
-                ["pactl", "set-source-volume", "@DEFAULT_SOURCE@", "100%"],
+                ["pactl", "set-source-mute", "@DEFAULT_SOURCE@", "0"],
                 capture_output=True, timeout=3,
             )
-            print("[ear] microphone capture volume was low — raised it")
+            print("[ear] microphone was muted — unmuted it")
     except (OSError, subprocess.SubprocessError):
         pass
+    current = _source_volume()
+    if current is not None and current < 20:
+        if _set_source_volume(_SOURCE_VOLUME_START):
+            print(f"[ear] microphone source volume {current}% -> "
+                  f"{_SOURCE_VOLUME_START}% (was effectively silent)")
+
+
+def _trim_source_volume(floor_rms: float) -> bool:
+    """Move the source volume toward a band where speech clears the gate.
+
+    Returns True when it changed the volume, so the caller can skip the ALSA
+    trim for a cycle instead of chasing a stale floor with a second gain
+    stage.
+    """
+    if floor_rms <= 0:
+        return False
+    current = _source_volume()
+    if current is None:
+        return False
+    if floor_rms > _SOURCE_FLOOR_CLIP:
+        # A clipping chain does not need a slow walk down; one decisive drop
+        # gets the input usable before the first spoken phrase.
+        target = min(current, _SOURCE_VOLUME_COOL)
+    elif floor_rms > _SOURCE_FLOOR_HIGH:
+        target = max(_SOURCE_VOLUME_MIN, current - _SOURCE_VOLUME_STEP)
+    elif floor_rms < _SOURCE_FLOOR_LOW:
+        target = min(_SOURCE_VOLUME_MAX, current + _SOURCE_VOLUME_STEP)
+    else:
+        return False
+    if target == current or not _set_source_volume(target):
+        return False
+    print(f"[ear] source volume {current}% -> {target}% "
+          f"(floor rms {floor_rms:.0f})")
+    return True
 
 
 class Ear:
@@ -811,6 +889,41 @@ class Ear:
             audio, language=STT_LANGUAGE, show_all=True)
         return _pick_transcript(result)
 
+    def _calibrate_source(self, source, chunk: int):
+        """Measure the ambient floor and put the input gain in a usable band.
+
+        Called once before the listen loop starts. Reads ~0.6 s per round and
+        is capped at three rounds, so startup stays quick. Returns the last
+        batch of levels so the caller can seed its noise-floor history; a
+        gate built from an empty history starts at the absolute minimum and
+        spends its first seconds reacting to room noise.
+        """
+        seconds_per_chunk = chunk / source.SAMPLE_RATE
+        needed = max(4, int(0.6 / seconds_per_chunk))
+        levels = []
+        for attempt in range(3):
+            levels = []
+            for _ in range(needed):
+                try:
+                    data = source.stream.read(chunk)
+                except Exception:
+                    return levels
+                if data:
+                    levels.append(_rms(data, source.SAMPLE_WIDTH))
+            if not levels:
+                return levels
+            # Lower quartile, not the median: the user may already be talking
+            # while the window is still starting, and speech must not be
+            # mistaken for a high noise floor and have its gain turned down.
+            ordered = sorted(levels)
+            floor = ordered[max(0, len(ordered) // 4)]
+            if _DEBUG:
+                print(f"[ear] calibration {attempt + 1}: floor rms {floor:.0f}")
+            if not _trim_source_volume(floor):
+                return levels
+            time.sleep(0.3)  # let PipeWire apply the new volume
+        return levels
+
     def _listen_loop(self, recognizer, source):
         import speech_recognition as sr
 
@@ -835,6 +948,11 @@ class Ear:
         attack_chunks = 2
         above_run = 0
         gain_card = _ensure_sane_mic_gain()
+        # Measure the room before listening: a source at 100% on a noisy mic
+        # clips, and one at 12% is ~55 dB down. Either way the fixed gate can
+        # never separate speech from the floor, which is what "it doesn't
+        # hear me" looks like from the outside.
+        history.extend(self._calibrate_source(source, chunk))
         last_gain_check = time.monotonic()
 
         while True:
@@ -847,7 +965,17 @@ class Ear:
                 last_gain_check = time.monotonic()
                 gain_card = _ensure_sane_mic_gain() or gain_card
                 if len(history) >= 20:
-                    _trim_capture_gain(gain_card, statistics.median(history))
+                    floor = statistics.median(history)
+                    # The PipeWire/PulseAudio source volume is the dominant
+                    # gain stage and the one the startup calibration already
+                    # steered. The ALSA 'Capture' trim is only a fallback:
+                    # running both makes them chase each other, and on this
+                    # machine the ALSA trim would walk Capture to 63 (+30 dB)
+                    # while the source volume was still adjusting.
+                    if _source_volume() is None:
+                        _trim_capture_gain(gain_card, floor)
+                    else:
+                        _trim_source_volume(floor)
             try:
                 data = source.stream.read(chunk)
             except Exception as exc:
