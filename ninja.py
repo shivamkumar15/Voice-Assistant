@@ -16,8 +16,11 @@ Usage:
 """
 
 import argparse
+import os
 import re
+import sys
 import threading
+from pathlib import Path
 
 from assistant import ear, mouth
 from assistant.brain import Brain
@@ -167,7 +170,41 @@ def run_text_mode():
         print(f"{ASSISTANT_NAME}: {reply}")
 
 
+def _reexec_in_venv():
+    """Restart under .venv when launched by the system Python.
+
+    The system interpreter has none of the voice dependencies, so
+    `python ninja.py` used to open the HUD and silently run without a
+    microphone — which looks exactly like "it doesn't listen". run.sh already
+    handles this, but an IDE, desktop entry or muscle memory can bypass it.
+    """
+    if os.environ.get("NINJA_VENV_REEXEC") == "1":
+        return
+    try:
+        import speech_recognition  # noqa: F401
+        return
+    except ImportError:
+        pass
+    venv_python = Path(__file__).resolve().parent / ".venv" / "bin" / "python"
+    if not venv_python.exists():
+        return
+    try:
+        # Compare prefixes, not resolved executable paths: .venv/bin/python is
+        # usually a symlink to the system interpreter, so resolving both
+        # makes them look identical even though their sys.path differs.
+        if Path(sys.prefix).resolve() == venv_python.parent.parent.resolve():
+            return
+    except OSError:
+        pass
+    print("[startup] voice dependencies are not in this Python — "
+          "restarting with .venv/bin/python", flush=True)
+    os.environ["NINJA_VENV_REEXEC"] = "1"
+    script = Path(__file__).resolve()
+    os.execv(str(venv_python), [str(venv_python), str(script), *sys.argv[1:]])
+
+
 def main():
+    _reexec_in_venv()
     parser = argparse.ArgumentParser(description=f"{ASSISTANT_NAME} desktop assistant")
     parser.add_argument("--no-wake", dest="no_wake", action="store_true",
                         help="listen continuously, treat every phrase as a command (default)")
