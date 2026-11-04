@@ -148,8 +148,14 @@ speakers: the microphone hears the music/video, the noise floor rises, and
 your voice no longer clears the gate. Use headphones, turn the media down, or
 raise `MIC_GATE_FACTOR`. There is no echo cancellation in the capture path.
 
-The assistant raises a muted/quiet PulseAudio source to 100% when the stream
-opens, but it leaves a deliberately lowered level alone after that.
+At startup the assistant unmutes the default source, zeroes a maxed "Internal
+Mic Boost", then measures the room for ~2 seconds and trims the PipeWire/
+PulseAudio source volume into a band where speech clears the gate. It does not
+force the source to 100%: on a noisy laptop mic that can clip the input and
+raise the noise floor above every possible speech level, which sounds exactly
+like a deaf assistant. If the level is still wrong, run
+`pactl get-source-volume @DEFAULT_SOURCE@` and adjust it by hand; the periodic
+trim will leave a level that is already in the usable band alone.
 
 ### AI brain
 
